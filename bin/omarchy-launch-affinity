@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# omarchy:summary=Launch Affinity (Wine + DXVK); pass documents to open them.
+# omarchy:args=[--winecfg|--verbose] [files...]
+# omarchy:examples=omarchy launch affinity | omarchy launch affinity ~/Pictures/cover.afphoto | omarchy launch affinity --verbose
+
+set -e
+
+# shellcheck source=omarchy-affinity-env
+source "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/omarchy-affinity-env"
+
+mode=launch
+files=()
+for arg in "$@"; do
+  case "$arg" in
+    --winecfg) mode=winecfg ;;
+    --verbose) export WINEDEBUG="fixme-all,err+all,warn+module" ;;
+    -h | --help)
+      cat <<'USAGE'
+Usage: omarchy-launch-affinity [--winecfg|--verbose] [files...]
+
+Options:
+  --winecfg   Open winecfg for the Affinity prefix instead of the app.
+  --verbose   Keep Wine's error/warn output on the terminal (for bug reports).
+USAGE
+      exit 0
+      ;;
+    *) files+=("$arg") ;;
+  esac
+done
+
+if ! affinity_installed; then
+  echo "Affinity is not installed. Run omarchy-install-affinity first." >&2
+  exit 1
+fi
+
+affinity_wine_env
+
+if [[ $mode == "winecfg" ]]; then
+  exec "$AFFINITY_WINE/bin/winecfg"
+fi
+
+affinity_render_env
+affinity_apply_dpi
+
+# Affinity wants Windows paths; winepath maps /home/... onto the Z: drive.
+win_files=()
+for file in "${files[@]}"; do
+  win_files+=("$(winepath -w "$file")")
+done
+
+exec "$WINE" "$AFFINITY_EXE" "${win_files[@]}"

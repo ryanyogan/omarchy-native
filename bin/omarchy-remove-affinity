@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# omarchy:summary=Remove Affinity, its Wine prefix and runner, launcher entry, file associations, and Hyprland rules.
+# omarchy:requires-sudo=true
+
+set -e
+
+# shellcheck source=omarchy-affinity-env
+source "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/omarchy-affinity-env"
+
+echo "Removing Affinity..."
+
+# Stop anything still running out of the prefix before deleting it.
+if [[ -x $AFFINITY_WINE/bin/wineserver ]]; then
+  WINEPREFIX="$AFFINITY_PREFIX" "$AFFINITY_WINE/bin/wineserver" -k 2>/dev/null || true
+fi
+pkill -f "$AFFINITY_PREFIX" 2>/dev/null || true
+sleep 1
+
+rm -rf "$AFFINITY_ROOT" "$AFFINITY_CACHE"
+
+# Launcher, icon, and file associations.
+rm -f "$AFFINITY_DESKTOP_FILE" "$AFFINITY_ICON_FILE" "$AFFINITY_MIME_FILE"
+mimeapps="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
+if [[ -f $mimeapps ]]; then
+  sed -i '/=affinity\.desktop;\?$/d' "$mimeapps"
+fi
+update-mime-database "${XDG_DATA_HOME:-$HOME/.local/share}/mime" &>/dev/null || true
+update-desktop-database "${AFFINITY_DESKTOP_FILE%/*}" &>/dev/null || true
+gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" &>/dev/null || true
+
+# Hyprland rules: drop the fragment and the require line the installer appended.
+rm -f "$AFFINITY_HYPR_FILE"
+if [[ -f $AFFINITY_HYPR_CONFIG ]]; then
+  sed -i '/-- omarchy-affinity$/d' "$AFFINITY_HYPR_CONFIG"
+fi
+
+# Menu rows: the exact lines the installer appended.
+if [[ -f $AFFINITY_MENU_FILE ]]; then
+  sed -i \
+    -e '/"install\.creative\.affinity"/d' \
+    -e '/"remove\.creative\.affinity"/d' \
+    -e '/"install\.creative": {"icon":"󰃣","label":"Creative"},$/d' \
+    -e '/"remove\.creative": {"icon":"󰃣","label":"Creative","title":"Remove"},$/d' \
+    "$AFFINITY_MENU_FILE"
+fi
+
+if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE-} ]]; then
+  hyprctl reload >/dev/null 2>&1 || true
+fi
+
+echo
+echo "Affinity, its Wine prefix, and the patched Wine runner have been removed."
+
+if omarchy-pkg-present winetricks; then
+  echo
+  if gum confirm "Also remove winetricks and cabextract? Lutris and other Wine setups use them too."; then
+    omarchy-pkg-drop winetricks cabextract
+  fi
+fi

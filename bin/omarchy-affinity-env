@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# omarchy:summary=Shared paths, download pins, and Wine environment for the Affinity commands (sourced, not run).
+# omarchy:hidden=true
+
+# shellcheck disable=SC2034  # variables are consumed by the scripts that source this file
+
+# Sourced by omarchy-install-affinity, omarchy-launch-affinity, and
+# omarchy-remove-affinity so the three agree on where everything lives.
+# Resolve the repo root from this file so the commands work whether they're on
+# PATH, symlinked into ~/.local/bin, or run by absolute path.
+if [[ -z ${OMARCHY_NATIVE_PATH-} ]]; then
+  OMARCHY_NATIVE_PATH=$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+fi
+export OMARCHY_NATIVE_PATH
+
+# App state lives beside Omarchy's other per-user state, never in ~/.wine.
+AFFINITY_ROOT="${OMARCHY_AFFINITY_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy/affinity}"
+AFFINITY_PREFIX="$AFFINITY_ROOT/prefix"
+AFFINITY_WINE="$AFFINITY_ROOT/wine"
+AFFINITY_STATE="$AFFINITY_ROOT/state"
+AFFINITY_EXE="$AFFINITY_PREFIX/drive_c/Program Files/Affinity/Affinity/Affinity.exe"
+AFFINITY_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/affinity"
+
+# ElementalWarrior's Affinity-patched Wine, prebuilt by ryzendew/Affinity-Wine-Builder.
+# See docs/affinity.md for why this runner and not umu/Proton. Bump the version,
+# URL, and checksum together; the installer replaces the vendored build when the
+# version changes.
+AFFINITY_WINE_VERSION="11.12"
+AFFINITY_WINE_URL="https://github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.12/ElementalWarrior-wine-11.12.tar.xz"
+AFFINITY_WINE_SHA256="44a99f2a90356790936f08620ccca573581c0bb006b9bed6899dd4ed465986aa"
+AFFINITY_WINE_ARCHIVE_DIR="ElementalWarrior-wine-11.12"
+
+# Canva's unified v3 installer (free tier). Unversioned on purpose: the URL
+# always serves the current build, so it is not pinned.
+AFFINITY_INSTALLER_URL="https://downloads.affinity.studio/Affinity%20x64.exe"
+
+# Winetricks verbs the prefix needs, in install order. Mirrors upstream minus
+# dotnet35 (only the legacy v2 scripts need it), crypt32 (Wine 11 builtin is
+# fine), and OpenCL/vkd3d-proton (deliberately off).
+AFFINITY_WINETRICKS_VERBS=(dotnet48 corefonts vcrun2022 msxml3 msxml6 tahoma dxvk renderer=vulkan win11)
+
+# MIME types this repo registers for Affinity's own formats. .psd already has a
+# shared-mime-info type.
+AFFINITY_MIME_TYPES=(
+  application/x-affinity-photo
+  application/x-affinity-designer
+  application/x-affinity-publisher
+  image/vnd.adobe.photoshop
+)
+
+# Per-user integration points written by install and removed by remove.
+AFFINITY_DESKTOP_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/applications/affinity.desktop"
+AFFINITY_ICON_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/affinity.svg"
+AFFINITY_MIME_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/mime/packages/omarchy-affinity.xml"
+AFFINITY_HYPR_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/affinity.lua"
+AFFINITY_HYPR_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua"
+AFFINITY_HYPR_REQUIRE='require("default.hypr.require_optional").module("hypr.affinity") -- omarchy-affinity'
+AFFINITY_MENU_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
+
+affinity_installed() {
+  [[ -x $AFFINITY_WINE/bin/wine && -f $AFFINITY_EXE ]]
+}
+
+# Exported Wine environment shared by prefix setup and launch.
+affinity_wine_env() {
+  export WINEPREFIX="$AFFINITY_PREFIX"
+  export WINE="$AFFINITY_WINE/bin/wine"
+  export WINESERVER="$AFFINITY_WINE/bin/wineserver"
+  export PATH="$AFFINITY_WINE/bin:$PATH"
+  export WINEDEBUG="${WINEDEBUG:--all}"
+  # winemenubuilder would litter the launcher with Wine's own .desktop and MIME
+  # entries; this repo ships its own, so keep it off for good.
+  export WINEDLLOVERRIDES="winemenubuilder.exe=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+}
+
+# DXVK env for launch. Values are what upstream AffinityOnLinux sets; the
+# DXVK_CONFIG line is their AMD workaround and is applied only on AMD GPUs.
+affinity_render_env() {
+  export DXVK_ASYNC=0
+  export DXVK_LOG_LEVEL=none
+  if affinity_gpu_vendor_present 0x1002; then
+    export DXVK_CONFIG="d3d9.deferSurfaceCreation = True; d3d9.shaderModel = 1"
+  fi
+}
+
+# Same sysfs approach as omarchy-hw-nvidia: lspci would wake a suspended GPU.
+affinity_gpu_vendor_present() {
+  local vendor="$1" device
+  local pci_devices_path="${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}"
+
+  for device in "$pci_devices_path"/*; do
+    [[ -r $device/vendor && -r $device/class ]] || continue
+    [[ $(<"$device/vendor") == "$vendor" ]] || continue
+    [[ $(<"$device/class") == 0x03* ]] && return 0
+  done
+
+  return 1
+}
+
+# Wine DPI that matches the current Hyprland monitor scale. Omarchy runs
+# XWayland with force_zero_scaling, so a 2x monitor gets 192 DPI from Wine
+# itself rather than a blurry compositor upscale. OMARCHY_AFFINITY_DPI pins it.
+affinity_target_dpi() {
+  local scale dpi
+
+  if [[ -n ${OMARCHY_AFFINITY_DPI-} ]]; then
+    printf '%s\n' "$OMARCHY_AFFINITY_DPI"
+    return 0
+  fi
+
+  scale=$(hyprctl monitors -j 2>/dev/null |
+    jq -r '[.[] | select(.disabled == false)] | (map(select(.focused)) + .)[0].scale // 1' 2>/dev/null)
+  [[ $scale =~ ^[0-9.]+$ ]] || scale=1
+  dpi=$(awk -v s="$scale" 'BEGIN { printf "%d", (96 * s) + 0.5 }')
+  (( dpi >= 96 )) || dpi=96
+  printf '%s\n' "$dpi"
+}
+
+# Write LogPixels only when it changed: reg add spins up wineserver, which is
+# a few hundred milliseconds nobody wants on every launch.
+affinity_apply_dpi() {
+  local dpi cached
+
+  dpi=$(affinity_target_dpi)
+  cached=""
+  if [[ -f $AFFINITY_STATE/dpi ]]; then
+    read -r cached <"$AFFINITY_STATE/dpi"
+  fi
+  [[ $dpi == "$cached" ]] && return 0
+
+  mkdir -p "$AFFINITY_STATE"
+  "$WINE" reg add 'HKEY_CURRENT_USER\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d "$dpi" /f >/dev/null 2>&1 &&
+    printf '%s\n' "$dpi" >"$AFFINITY_STATE/dpi"
+}
