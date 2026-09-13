@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Affinity
+GenericName=Image Editor
+Comment=Photo, Designer and Publisher in one app (Wine + DXVK)
+Exec=omarchy-launch-affinity %F
+Icon=affinity
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;VectorGraphics;Publishing;
+MimeType=application/x-affinity-photo;application/x-affinity-designer;application/x-affinity-publisher;image/vnd.adobe.photoshop;
+StartupNotify=true
+StartupWMClass=affinity.exe
