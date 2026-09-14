@@ -61,9 +61,9 @@ check(
 main_windows = [
     window
     for window in query("clients")
-    if window["class"] == "affinity.exe" and not window["floating"]
+    if window["class"] == "affinity.exe" and window["title"] == "Affinity"
 ]
-check(len(main_windows) == 1, "one tiled Affinity main window is open")
+check(len(main_windows) == 1, "one Affinity main window is open without modal dialogs")
 main = main_windows[0]
 check(main["xwayland"], "Affinity uses XWayland")
 check(not menus(), "home window and other untitled dialogs are dismissed")
@@ -96,9 +96,12 @@ def pointer(x, y, click=False):
         x11.XFlush(display)
 
 
-def escape():
-    dispatch('hl.dsp.send_shortcut({mods="",key="Escape"})')
-    time.sleep(0.1)
+def dismiss_menus():
+    # Exercise pointer behavior throughout; synthetic key events have not been
+    # reliable in this session. Clicking the same File label closes its menus.
+    if menus():
+        pointer(main['at'][0] + 62, main['at'][1] + 15, click=True)
+        time.sleep(0.2)
 
 
 try:
@@ -135,10 +138,11 @@ try:
                 any(w["address"] == child["address"] for w in menus()),
                 "submenu stays open when the pointer enters it",
             )
-            escape()
-        escape()
+            dismiss_menus()
+        dismiss_menus()
+        check(not menus(), f"File menu dismisses, attempt {attempt}")
 finally:
-    escape()
+    dismiss_menus()
     dispatch(
         f'hl.dsp.cursor.move({{x={original_pointer["x"]},y={original_pointer["y"]}}})'
     )

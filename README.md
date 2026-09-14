@@ -32,6 +32,7 @@ See [installation and compatibility](docs/affinity.md), the
 [local audit](docs/audit.md), and [earlier testing](docs/local-testing.md).
 The [creator workflow](docs/creator-workflow.md) connects Theo's public thumbnail
 examples to our acceptance tests and performance priorities.
+See the [session history and next steps](docs/session-history.md) to resume local UX work.
 
 Run `test/affinity` for static checks and isolated installer/removal regressions.
 `test/affinity-interactions` exercises real menus on the documented desktop

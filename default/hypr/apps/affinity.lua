@@ -20,6 +20,15 @@ o.window("^affinity( x64)?\\.exe$", { tag = "-default-opacity", opacity = "1 1" 
 -- Wine also exposes menus and tool flyouts as floating windows. Preserve their
 -- app-requested positions: centring all floating windows detaches popups from
 -- their controls and makes pointer navigation unreliable.
+o.window({ class = "^affinity\\.exe$", title = "^$", float = true }, {
+  no_initial_focus = true,
+  no_follow_mouse = true,
+  no_anim = true,
+  no_blur = true,
+  no_shadow = true,
+  border_size = 0,
+  rounding = 0,
+})
 
 -- Belt and braces for dialogs Wine forgets to mark transient.
 o.window({

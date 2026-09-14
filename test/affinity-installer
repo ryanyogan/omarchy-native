@@ -117,6 +117,21 @@ printf '%s\\n' "$@" >> "$WINEPREFIX/launch-args"''', self.runner)
         self.assertIn('--app-id=org.omarchy.terminal', result.stdout)
         self.assertIn('--terminal\n--install', result.stdout)
 
+    def test_cursor_matches_dpi_without_changing_desktop_theme(self):
+        app = self.root / 'prefix/drive_c/Program Files/Affinity/Affinity/Affinity.exe'
+        app.parent.mkdir(parents=True)
+        app.write_text('fixture')
+        self.script('wine', 'if [[ $1 != reg ]]; then printf "%s:%s" "$XCURSOR_SIZE" "$XCURSOR_THEME"; fi', self.runner)
+        self.env.update(XCURSOR_SIZE='24', XCURSOR_THEME='user-theme')
+        self.env.pop('OMARCHY_AFFINITY_CURSOR_SIZE', None)
+        for dpi, expected in [('96', '24'), ('144', '36'), ('192', '48')]:
+            self.env['OMARCHY_AFFINITY_DPI'] = dpi
+            result = self.run_cmd(str(REPO / 'bin/omarchy-launch-affinity'))
+            self.assertEqual(result.stdout, expected + ':user-theme')
+        self.env['OMARCHY_AFFINITY_CURSOR_SIZE'] = '64'
+        result = self.run_cmd(str(REPO / 'bin/omarchy-launch-affinity'))
+        self.assertEqual(result.stdout, '64:user-theme')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -21,6 +21,7 @@ python3 "$helper" idle
 python3 "$helper" capture
 if python3 "$helper" needs-packages; then sudo -v; fi
 affinity_wine_env
+affinity_cursor_env
 # ---------------------------------------------------------------------------
 # Patched Wine runner, pinned by checksum and replaced when the version bumps.
 download() {

@@ -58,6 +58,7 @@ fi
 
 affinity_lock -s
 affinity_wine_env
+affinity_cursor_env
 
 if [[ $mode == "winecfg" ]]; then
   exec "$AFFINITY_WINE/bin/winecfg"

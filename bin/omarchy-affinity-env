@@ -122,6 +122,26 @@ affinity_target_dpi() {
   printf '%s\n' "$dpi"
 }
 
+# XWayland zero-scaling uses physical pixels, including Xcursor themes. A
+# desktop cursor size of 24 needs 48 physical pixels at 192 DPI. Keep the
+# desktop theme and all global cursor settings; only this process inherits it.
+affinity_cursor_env() {
+  local dpi size
+  dpi=$(affinity_target_dpi)
+  size="${OMARCHY_AFFINITY_CURSOR_SIZE:-}"
+  if [[ -z $size ]]; then
+    # Capture once: install calls the shared Wine setup more than once.
+    AFFINITY_DESKTOP_CURSOR_SIZE="${AFFINITY_DESKTOP_CURSOR_SIZE:-${XCURSOR_SIZE:-24}}"
+    [[ $AFFINITY_DESKTOP_CURSOR_SIZE =~ ^[1-9][0-9]*$ ]] || AFFINITY_DESKTOP_CURSOR_SIZE=24
+    size=$(awk -v base="$AFFINITY_DESKTOP_CURSOR_SIZE" -v dpi="$dpi" 'BEGIN { printf "%d", base * dpi / 96 + 0.5 }')
+  fi
+  if [[ ! $size =~ ^[1-9][0-9]*$ ]] || (( size > 256 )); then
+    echo 'Affinity cursor size must be an integer from 1 to 256 physical pixels.' >&2
+    return 2
+  fi
+  export XCURSOR_SIZE="$size"
+}
+
 # Write LogPixels only when it changed: reg add spins up wineserver, which is
 # a few hundred milliseconds nobody wants on every launch.
 affinity_apply_dpi() {

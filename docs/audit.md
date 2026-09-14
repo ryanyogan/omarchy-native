@@ -5,6 +5,10 @@ this desktop, but it has not earned a claim of full native-app reliability.
 Document handoff, account integration, color management, and extended creative
 workflows remain release blockers or unverified areas.
 
+This audit records the earlier laptop session. The later Studio Display UX
+checkpoint, including a failing final menu rerun and unfinished Welcome layout,
+is recorded in [session history](session-history.md).
+
 ## Environment and measured results
 
 Omarchy 4.0.3, Hyprland 0.56.2, AMD Radeon 890M/RADV, a 2880×1920 panel at 2×

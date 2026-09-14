@@ -142,6 +142,17 @@ application-requested positions.** A broad center-all-floating rule caused the
 original nearly unusable hover behavior. An empty title or X11 `DIALOG` type is
 not enough to distinguish a menu from a dialog.
 
+Untitled floating windows now avoid initial focus, pointer-follow focus, and
+compositor animations/decorations. Live tooltips stayed anchored without stealing
+editor focus. Welcome is also untitled and currently shares those rules: its
+independent sizing, centering, and focus handling remain unfinished. The intended
+layout is **floating Welcome, tiled editor**.
+
+The launcher scales the inherited Xcursor size to Wine DPI without changing the
+desktop theme or global settings: 24 desktop pixels become 48 physical pixels
+at 192 DPI. `OMARCHY_AFFINITY_CURSOR_SIZE` overrides the physical size (1–256).
+Restart Affinity to apply launcher environment changes.
+
 Hyprland already manages native Wayland, native Linux X11, and Wine windows.
 Changing Wine's driver or using a Wine desktop does not turn Affinity into a
 Linux executable. XWayland remains the verified path. Native Wine Wayland and
@@ -162,6 +173,11 @@ Use `omarchy-launch-affinity --verbose` for diagnostics, `test/affinity-profile`
 for a read-only CPU/PSS sample, and `test/affinity-interactions` for the documented
 live menu regression. `test/affinity` runs static validation and isolated lifecycle
 regressions without Wine or a desktop.
+`test/affinity-ux` checks live tooltip focus, placement, and cursor dimensions with
+the Vector studio visible on the documented single 2× display. These live scripts
+temporarily move the pointer; dismiss Welcome and dialogs before running them.
+The latest menu rerun failed on its second opening; see
+[session history](session-history.md) for the checkpoint and remaining work.
 
 Affinity is proprietary and downloaded from Canva; its terms and account
 requirements apply. Wine is LGPL; winetricks has its own LGPL license. The
