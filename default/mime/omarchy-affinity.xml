@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-affinity">
+    <comment>Affinity document</comment>
+    <glob pattern="*.af"/>
+    <icon name="affinity"/>
+  </mime-type>
   <mime-type type="application/x-affinity-photo">
     <comment>Affinity Photo document</comment>
     <glob pattern="*.afphoto"/>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <title>Original synthetic creator workflow fixture</title>
+  <rect id="background" width="1280" height="720" fill="#18202c"/>
+  <rect id="accent" x="64" y="80" width="12" height="560" fill="#a6da95"/>
+  <text id="eyebrow" x="108" y="136" fill="#a6da95" font-family="Arial" font-size="24">OMARCHY / CREATOR WORKFLOW</text>
+  <text id="headline" x="108" y="278" fill="#ffffff" font-family="Arial" font-size="82" font-weight="bold">MAKE IT</text>
+  <text id="headline-2" x="108" y="374" fill="#ffffff" font-family="Arial" font-size="82" font-weight="bold">FEEL NATIVE.</text>
+  <text id="caption" x="108" y="576" fill="#cad3f5" font-family="Arial" font-size="28">Editable text. Clean edges. Predictable output.</text>
+  <g id="graphic">
+    <rect x="930" y="160" width="240" height="240" rx="40" fill="#8aadf4"/>
+    <path d="M 978,332 L 1050,210 L 1122,332 Z" fill="#18202c"/>
+    <circle cx="1050" cy="470" r="52" fill="#a6da95"/>
+  </g>
+  <g id="color-reference">
+    <rect x="930" y="584" width="60" height="48" fill="#ff0000"/>
+    <rect x="990" y="584" width="60" height="48" fill="#00ff00"/>
+    <rect x="1050" y="584" width="60" height="48" fill="#0000ff"/>
+    <rect x="1110" y="584" width="60" height="48" fill="#ffffff"/>
+  </g>
+</svg>

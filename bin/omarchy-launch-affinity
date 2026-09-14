@@ -1,30 +1,43 @@
 #!/bin/bash
 
 # omarchy:summary=Launch Affinity (Wine + DXVK); pass documents to open them.
-# omarchy:args=[--winecfg|--verbose] [files...]
+# omarchy:args=[--winecfg|--verbose|--desktop] [--] [files...]
 # omarchy:examples=omarchy launch affinity | omarchy launch affinity ~/Pictures/cover.afphoto | omarchy launch affinity --verbose
 
-set -e
+set -euo pipefail
 
 # shellcheck source=omarchy-affinity-env
 source "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/omarchy-affinity-env"
 
+# shellcheck source=omarchy-affinity-ui
+source "$OMARCHY_NATIVE_PATH/bin/omarchy-affinity-ui"
 mode=launch
+options=1
+experimental_file_open=0
 files=()
 for arg in "$@"; do
+  if (( ! options )); then files+=("$arg"); continue; fi
   case "$arg" in
+    --) options=0 ;;
+    --experimental-file-open) experimental_file_open=1 ;;
+    --desktop) mode=desktop ;;
     --winecfg) mode=winecfg ;;
     --verbose) export WINEDEBUG="fixme-all,err+all,warn+module" ;;
     -h | --help)
       cat <<'USAGE'
-Usage: omarchy-launch-affinity [--winecfg|--verbose] [files...]
+Usage: omarchy-launch-affinity [--winecfg|--verbose|--desktop] [--] [files...]
 
 Options:
   --winecfg   Open winecfg for the Affinity prefix instead of the app.
+  --experimental-file-open
+              Test the unverified document handoff (can crash Affinity).
+  --desktop   Open inside a contained Wine desktop (1440×900).
+  --          Treat remaining arguments as filenames.
   --verbose   Keep Wine's error/warn output on the terminal (for bug reports).
 USAGE
       exit 0
       ;;
+    -*) echo "Unknown option: $arg" >&2; exit 2 ;;
     *) files+=("$arg") ;;
   esac
 done
@@ -34,6 +47,16 @@ if ! affinity_installed; then
   exit 1
 fi
 
+if (( ${#files[@]} && ! experimental_file_open )); then
+  message='File-manager opening is not ready yet. Open Affinity and use File > Open to protect your work.'
+  printf '%s\n' "$message" >&2
+  if [[ ! -t 2 ]] && command -v notify-send >/dev/null; then
+    notify-send --app-name=Affinity 'Open your document from Affinity' "$message" || true
+  fi
+  exit 2
+fi
+
+affinity_lock -s
 affinity_wine_env
 
 if [[ $mode == "winecfg" ]]; then
@@ -46,7 +69,12 @@ affinity_apply_dpi
 # Affinity wants Windows paths; winepath maps /home/... onto the Z: drive.
 win_files=()
 for file in "${files[@]}"; do
-  win_files+=("$(winepath -w "$file")")
+  [[ -f $file ]] || { echo "File does not exist: $file" >&2; exit 1; }
+  converted=$(winepath -w "$(realpath -- "$file")")
+  win_files+=("$converted")
 done
 
+if [[ $mode == desktop ]]; then
+  exec "$WINE" explorer /desktop=Affinity,1440x900 "$AFFINITY_EXE" "${win_files[@]}"
+fi
 exec "$WINE" "$AFFINITY_EXE" "${win_files[@]}"

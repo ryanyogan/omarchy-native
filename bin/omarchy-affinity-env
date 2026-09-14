@@ -14,8 +14,9 @@ if [[ -z ${OMARCHY_NATIVE_PATH-} ]]; then
 fi
 export OMARCHY_NATIVE_PATH
 
-# App state lives beside Omarchy's other per-user state, never in ~/.wine.
-AFFINITY_ROOT="${OMARCHY_AFFINITY_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy/affinity}"
+# Keep user state outside the packaged Omarchy tree: ~/.local/share/omarchy
+# can be a symlink to root-owned /usr/share/omarchy. Never use ~/.wine.
+AFFINITY_ROOT="${OMARCHY_AFFINITY_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-affinity}"
 AFFINITY_PREFIX="$AFFINITY_ROOT/prefix"
 AFFINITY_WINE="$AFFINITY_ROOT/wine"
 AFFINITY_STATE="$AFFINITY_ROOT/state"
@@ -38,11 +39,15 @@ AFFINITY_INSTALLER_URL="https://downloads.affinity.studio/Affinity%20x64.exe"
 # Winetricks verbs the prefix needs, in install order. Mirrors upstream minus
 # dotnet35 (only the legacy v2 scripts need it), crypt32 (Wine 11 builtin is
 # fine), and OpenCL/vkd3d-proton (deliberately off).
+AFFINITY_WINETRICKS="${OMARCHY_AFFINITY_WINETRICKS:-$AFFINITY_STATE/winetricks}"
+AFFINITY_WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/20260125/src/winetricks"
+AFFINITY_WINETRICKS_SHA256="431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b"
 AFFINITY_WINETRICKS_VERBS=(dotnet48 corefonts vcrun2022 msxml3 msxml6 tahoma dxvk renderer=vulkan win11)
 
 # MIME types this repo registers for Affinity's own formats. .psd already has a
 # shared-mime-info type.
 AFFINITY_MIME_TYPES=(
+  application/x-affinity
   application/x-affinity-photo
   application/x-affinity-designer
   application/x-affinity-publisher

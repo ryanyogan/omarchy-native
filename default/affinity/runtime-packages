@@ -1,0 +1,29 @@
+# In addition to Arch wine's mandatory dependencies, the pinned runner directly
+# links these libraries or loads them for fonts, TLS, graphics, and audio.
+# No 32-bit libraries: this runner uses Wine's new WoW64 architecture.
+fontconfig
+freetype2
+gnutls
+gst-plugins-base-libs
+gstreamer
+libglvnd
+libpulse
+libusb
+ocl-icd
+vulkan-icd-loader
+# Installer tools (winetricks itself is private and checksum-pinned).
+bash
+cabextract
+curl
+perl
+unzip
+# Direct ELF dependencies of this exact Wine build (independent of future
+# changes to the distro Wine package's own dependency set).
+glibc
+libgcc
+glib2
+libx11
+libxext
+libxkbcommon
+systemd-libs
+wayland

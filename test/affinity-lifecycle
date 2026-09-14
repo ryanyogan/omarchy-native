@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Lifecycle regressions use real temporary files and mock only OS/package boundaries."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+class Lifecycle(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.env = {'HOME': str(self.home), 'XDG_DATA_HOME': str(self.home / '.local/share'),
+                    'XDG_CONFIG_HOME': str(self.home / '.config'), 'XDG_CACHE_HOME': str(self.home / '.cache'),
+                    'OMARCHY_AFFINITY_ROOT': str(self.home / '.local/share/omarchy-affinity')}
+        self.environment = patch.dict(os.environ, self.env)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        spec = importlib.util.spec_from_file_location('lifecycle', REPO / 'libexec/affinity-lifecycle.py')
+        self.app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.app)
+        self.commands = []
+        self.boundary = patch.object(self.app, 'run', self.run_command)
+        self.boundary.start()
+        self.addCleanup(self.boundary.stop)
+        self.idle = patch.object(self.app, 'running', return_value=[])
+        self.idle.start()
+        self.addCleanup(self.idle.stop)
+
+    def run_command(self, *args, **kwargs):
+        self.commands.append(args)
+        if args[:2] == ('pacman', '-Qq'):
+            return subprocess.CompletedProcess(args, 0, 'wine\nwinetricks\ncabextract\nunzip\nvulkan-icd-loader\n')
+        if args[:3] == ('xdg-mime', 'query', 'default'):
+            return subprocess.CompletedProcess(args, 0, 'previous.desktop\n')
+        return subprocess.CompletedProcess(args, 0, '')
+
+    def file(self, relative, text='data'):
+        target = self.app.ROOT / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        return target
+
+    def install(self, legacy=False):
+        if legacy:
+            self.file('prefix/system.reg')
+        self.app.capture()
+        self.file('prefix/system.reg')
+        self.file('prefix/drive_c/windows/system32/runtime.dll', 'runtime')
+        for target, source in self.app.ASSETS.values():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+        self.app.seal()
+
+    def backup(self):
+        return next(p for p in (self.home / 'Affinity Backups').iterdir() if p.is_dir())
+
+    def test_remove_preserves_documents_changed_runtime_links_and_foreign_files(self):
+        self.install()
+        self.file('prefix/drive_c/users/ryan/Documents/art.af', 'valuable work')
+        changed = self.file('prefix/drive_c/windows/system32/runtime.dll', 'modified by user')
+        outside = self.home / 'original.af'
+        outside.write_text('outside work')
+        (self.app.ROOT / 'prefix/drive_c/users/ryan/Documents/external').symlink_to(self.home, target_is_directory=True)
+        self.file('notes/private.txt', 'extra data')
+        self.app.remove()
+        backup = self.backup()
+        self.assertEqual((backup / 'prefix/drive_c/users/ryan/Documents/art.af').read_text(), 'valuable work')
+        self.assertEqual((backup / 'prefix/drive_c/windows/system32/runtime.dll').read_text(), 'modified by user')
+        self.assertTrue((backup / 'prefix/drive_c/users/ryan/Documents/external').is_symlink())
+        self.assertEqual((backup / 'extra/notes/private.txt').read_text(), 'extra data')
+        self.assertEqual(outside.read_text(), 'outside work')
+        self.assertFalse(self.app.ROOT.exists())
+        self.assertFalse(changed.exists())
+
+    def test_fresh_backup_omits_only_unchanged_recorded_runtime(self):
+        self.install()
+        self.file('prefix/drive_c/windows/unrecorded.af', 'keep')
+        self.app.remove()
+        backup = self.backup()
+        self.assertFalse((backup / 'prefix/drive_c/windows/system32/runtime.dll').exists())
+        self.assertEqual((backup / 'prefix/drive_c/windows/unrecorded.af').read_text(), 'keep')
+
+    def test_legacy_backup_retains_complete_prefix(self):
+        self.install(legacy=True)
+        self.app.remove()
+        self.assertEqual((self.backup() / 'prefix/drive_c/windows/system32/runtime.dll').read_text(), 'runtime')
+
+    def test_backup_failure_does_not_delete_install_or_packages(self):
+        self.install()
+        with patch.object(self.app.shutil, 'copytree', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.app.remove()
+        self.assertTrue(self.app.ROOT.exists())
+        self.assertFalse(any(command[:4] == ('sudo', '-n', 'pacman', '-R') for command in self.commands))
+
+    def test_running_app_and_unsafe_roots_are_refused(self):
+        self.install()
+        with patch.object(self.app, 'running', return_value=['Affinity.exe']):
+            with self.assertRaisesRegex(RuntimeError, 'Close Affinity'):
+                self.app.remove()
+        with patch.object(self.app, 'ROOT', self.home):
+            with self.assertRaisesRegex(RuntimeError, 'Unsafe installation'):
+                self.app.validate()
+        with patch.object(self.app, 'ROOT', self.home / '.local/share'):
+            with self.assertRaisesRegex(RuntimeError, 'Unsafe installation'):
+                self.app.validate()
+        self.assertTrue(self.app.ROOT.exists())
+
+    def test_symlinked_root_is_refused(self):
+        target = self.home / 'target'
+        target.mkdir()
+        self.app.ROOT.parent.mkdir(parents=True)
+        self.app.ROOT.symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'symlinks'):
+            self.app.validate()
+
+    def test_restore_original_assets_and_keep_later_customization(self):
+        desktop = self.app.ASSETS['desktop'][0]
+        desktop.parent.mkdir(parents=True)
+        desktop.write_text('original launcher')
+        self.install()
+        hypr = self.app.ASSETS['hypr'][0]
+        hypr.write_text('user changed this later')
+        self.app.remove()
+        self.assertEqual(desktop.read_text(), 'original launcher')
+        self.assertEqual(hypr.read_text(), 'user changed this later')
+
+    def test_mime_cleanup_preserves_other_apps_and_restores_default(self):
+        self.install()
+        mime = self.app.CONFIG / 'mimeapps.list'
+        mime.write_text('[Default Applications]\napplication/x-affinity=affinity.desktop;another.desktop;\ntext/plain=editor.desktop;\n[Added Associations]\napplication/x-affinity=affinity.desktop;another.desktop;\n')
+        self.app.remove()
+        self.assertIn('application/x-affinity=previous.desktop;another.desktop;', mime.read_text())
+        self.assertIn('text/plain=editor.desktop;', mime.read_text())
+        self.assertNotIn('affinity.desktop', mime.read_text())
+
+    def test_only_recorded_packages_removed_without_recursive_orphan_cleanup(self):
+        self.install()
+        manifest = self.app.read_manifest()
+        manifest['packages'] = ['wine', 'cabextract', 'already-removed']
+        self.app.save(manifest)
+        self.app.remove()
+        removals = [args for args in self.commands if args[:4] == ('sudo', '-n', 'pacman', '-R')]
+        self.assertEqual(removals[-1], ('sudo', '-n', 'pacman', '-R', '--noconfirm', 'cabextract', 'wine'))
+        self.assertFalse(any('winetricks' in args for args in removals))
+
+    def test_packages_needed_by_other_apps_are_kept(self):
+        self.install()
+        manifest = self.app.read_manifest()
+        manifest['packages'] = ['wine', 'cabextract']
+        self.app.save(manifest)
+        original = self.run_command
+        def boundary(*args, **kwargs):
+            if args[:3] == ('pacman', '-R', '--print') and 'wine' in args:
+                raise subprocess.CalledProcessError(1, args, stderr="error: removing wine breaks dependency 'wine' required by another-app")
+            return original(*args, **kwargs)
+        with patch.object(self.app, 'run', side_effect=boundary):
+            self.app.remove()
+        removals = [args for args in self.commands if args[:4] == ('sudo', '-n', 'pacman', '-R')]
+        self.assertEqual(removals[-1], ('sudo', '-n', 'pacman', '-R', '--noconfirm', 'cabextract'))
+
+    def test_interrupted_package_transaction_is_recovered_from_private_log(self):
+        self.install()
+        (self.app.STATE / 'packages-123.log').write_text('[ALPM] installed new-dependency (1.0)\n[ALPM] upgraded old-package (1.0 -> 2.0)\n')
+        self.assertEqual(self.app.read_manifest()['packages'], ['new-dependency'])
+
+    def test_development_pruning_keeps_runtime_dlls_and_unrelated_cache(self):
+        self.install()
+        self.file('wine/include/wine/test.h')
+        self.file('wine/lib/wine/x86_64-windows/test.a')
+        dll = self.file('wine/lib/wine/x86_64-windows/test.dll')
+        shared = self.home / '.cache/winetricks/shared'
+        shared.parent.mkdir(parents=True)
+        shared.write_text('other installer')
+        self.app.prune_runtime()
+        self.assertTrue(dll.exists())
+        self.assertFalse((self.app.ROOT / 'wine/include').exists())
+        self.assertEqual(shared.read_text(), 'other installer')
+
+    def test_dry_run_does_not_mutate_any_files(self):
+        self.install()
+        before = self.app.MANIFEST.read_bytes()
+        self.app.remove(dry_run=True)
+        self.assertEqual(self.app.MANIFEST.read_bytes(), before)
+        self.assertFalse((self.home / 'Affinity Backups').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

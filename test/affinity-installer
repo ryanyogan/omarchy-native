@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Run the real shell entrypoints with isolated Wine/download/package executables."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+class Installer(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.root = self.home / '.local/share/omarchy-affinity'
+        self.stubs = self.home / 'stubs'
+        self.stubs.mkdir()
+        self.env = {**os.environ, 'HOME': str(self.home), 'XDG_DATA_HOME': str(self.home / '.local/share'),
+                    'XDG_CONFIG_HOME': str(self.home / '.config'), 'XDG_CACHE_HOME': str(self.home / '.cache'),
+                    'XDG_STATE_HOME': str(self.home / '.local/state'), 'XDG_RUNTIME_DIR': str(self.home / 'run'),
+                    'OMARCHY_AFFINITY_ROOT': str(self.root), 'OMARCHY_NATIVE_PATH': str(REPO),
+                    'OMARCHY_AFFINITY_WINETRICKS': str(self.stubs / 'winetricks'), 'OMARCHY_AFFINITY_DPI': '96', 'HYPRLAND_INSTANCE_SIGNATURE': '',
+                    'PATH': str(self.stubs) + ':' + os.environ['PATH']}
+        self.script('pacman', 'case $1 in -Si) echo "Depends On : glibc libx11";; -T) exit 0;; *) echo "wine\nwinetricks\ncabextract\nunzip\nvulkan-icd-loader\nclang\nlld";; esac')
+        for name in ['hyprctl', 'xdg-mime', 'update-mime-database', 'update-desktop-database', 'gtk-update-icon-cache']:
+            self.script(name, 'exit 0')
+        self.script('sudo', 'echo "Unexpected elevation" >&2; exit 99')
+        self.script('curl', '''for ((i=1;i<=$#;i++)); do
+  if [[ ${!i} == --output ]]; then j=$((i+1)); printf MZinstaller > "${!j}"; fi
+done''')
+        self.script('winetricks', 'printf "%s\\n" "${@: -1}" >> "$WINEPREFIX/winetricks.log"')
+        # A resumable partial install has its manifest before any downloads.
+        self.root.mkdir(parents=True)
+        self.run_cmd('python3', str(REPO / 'libexec/affinity-lifecycle.py'), 'capture')
+        self.runner = self.root / 'wine/bin'
+        self.runner.mkdir(parents=True)
+        (self.root / 'wine/.omarchy-version').write_text('11.12\n')
+        self.script('wine', '''if [[ $1 == reg ]]; then exit 0; fi
+mkdir -p "$WINEPREFIX/drive_c/Program Files/Affinity/Affinity"
+printf app > "$WINEPREFIX/drive_c/Program Files/Affinity/Affinity/Affinity.exe"
+printf '%s\\n' "$@" >> "$WINEPREFIX/launch-args"''', self.runner)
+        self.script('wineboot', 'mkdir -p "$WINEPREFIX"; touch "$WINEPREFIX/system.reg"', self.runner)
+        for name in ['wineserver', 'winecfg', 'regedit']:
+            self.script(name, 'exit 0', self.runner)
+        self.script('winepath', 'printf "Z:%s\\n" "$2"', self.runner)
+        self.config = self.home / '.config/hypr/hyprland.lua'
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text('-- personal configuration\n')
+        self.menu = self.home / '.config/omarchy/extensions/omarchy-menu.jsonc'
+        self.menu.parent.mkdir(parents=True)
+        self.menu.write_text('{"personal": {"label": "Notes"}}\n')
+
+    def script(self, name, body, folder=None):
+        path = (folder or self.stubs) / name
+        path.write_text('#!/bin/bash\nset -e\n' + body + '\n')
+        path.chmod(0o755)
+
+    def run_cmd(self, *args, success=True):
+        result = subprocess.run(args, env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+        if success:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+        return result
+
+    def install(self):
+        return self.run_cmd(str(REPO / 'bin/omarchy-install-affinity'))
+
+    def test_install_rerun_launch_remove_round_trip(self):
+        result = self.install()
+        self.assertIn('Affinity is ready', result.stdout)
+        self.assertNotIn('MZinstaller', result.stdout)
+        calls = (self.root / 'prefix/winetricks.log').read_text()
+        self.install()
+        self.assertEqual((self.root / 'prefix/winetricks.log').read_text(), calls)
+        self.assertEqual(self.config.read_text().count('-- omarchy-affinity'), 1)
+        self.assertEqual(self.menu.read_text(), '{"personal": {"label": "Notes"}}\n')
+        document = self.home / 'a file with spaces.af'
+        document.write_text('document')
+        self.run_cmd(str(REPO / 'bin/omarchy-launch-affinity'), '--experimental-file-open', '--', str(document))
+        self.assertIn('Z:' + str(document), (self.root / 'prefix/launch-args').read_text())
+        self.run_cmd(str(REPO / 'bin/omarchy-remove-affinity'), '--yes')
+        self.assertFalse(self.root.exists())
+        self.assertFalse((self.home / '.local/share/applications/affinity.desktop').exists())
+        self.assertNotIn('-- omarchy-affinity', self.config.read_text())
+        self.assertEqual(document.read_text(), 'document')
+
+    def test_failed_download_does_not_run_partial_installer_and_can_resume(self):
+        self.script('curl', 'echo "network failed" >&2; exit 22')
+        self.run_cmd(str(REPO / 'bin/omarchy-install-affinity'), success=False)
+        self.assertFalse((self.root / 'prefix/drive_c/Program Files/Affinity/Affinity/Affinity.exe').exists())
+        self.assertTrue((self.root / 'state/ownership.json').exists())
+        self.script('curl', 'while (( $# )); do if [[ $1 == --output ]]; then printf MZinstaller > "$2"; break; fi; shift; done')
+        self.install()
+
+    def test_missing_file_and_unknown_options_fail_before_launch(self):
+        self.install()
+        self.run_cmd(str(REPO / 'bin/omarchy-launch-affinity'), '--bogus', success=False)
+        self.run_cmd(str(REPO / 'bin/omarchy-launch-affinity'), str(self.home / 'missing.af'), success=False)
+
+    def test_unverified_document_handoff_does_not_invoke_wine(self):
+        self.install()
+        document = self.home / 'work.af'
+        document.write_text('valuable')
+        calls = (self.root / 'prefix/launch-args').read_text()
+        self.script('notify-send', 'exit 0')
+        result = self.run_cmd(str(REPO / 'bin/omarchy-launch-affinity'), str(document), success=False)
+        self.assertIn('File > Open', result.stderr)
+        self.assertEqual((self.root / 'prefix/launch-args').read_text(), calls)
+
+    def test_manager_passes_terminal_arguments_without_shell_expansion(self):
+        self.script('xdg-terminal-exec', 'printf "%s\\n" "$@"')
+        result = self.run_cmd(str(REPO / 'bin/omarchy-setup-affinity'), '--install')
+        self.assertIn('--app-id=org.omarchy.terminal', result.stdout)
+        self.assertIn('--terminal\n--install', result.stdout)
+
+
+if __name__ == '__main__':
+    unittest.main()

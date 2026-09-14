@@ -1,60 +1,38 @@
 #!/bin/bash
-
-# omarchy:summary=Remove Affinity, its Wine prefix and runner, launcher entry, file associations, and Hyprland rules.
+# omarchy:summary=Back up Affinity data, then remove its runtime and installer-owned dependencies.
+# omarchy:args=[--dry-run|--yes]
 # omarchy:requires-sudo=true
-
-set -e
-
+set -euo pipefail
+umask 077
 # shellcheck source=omarchy-affinity-env
 source "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/omarchy-affinity-env"
-
-echo "Removing Affinity..."
-
-# Stop anything still running out of the prefix before deleting it.
-if [[ -x $AFFINITY_WINE/bin/wineserver ]]; then
-  WINEPREFIX="$AFFINITY_PREFIX" "$AFFINITY_WINE/bin/wineserver" -k 2>/dev/null || true
+# shellcheck source=omarchy-affinity-ui
+source "$OMARCHY_NATIVE_PATH/bin/omarchy-affinity-ui"
+helper="$OMARCHY_NATIVE_PATH/libexec/affinity-lifecycle.py"
+case "${1-}" in
+  --dry-run) exec python3 "$helper" plan ;;
+  -h|--help) echo 'Usage: omarchy-remove-affinity [--dry-run|--yes]'; exit 0 ;;
+  --yes) ;;
+  '')
+    if [[ ! -t 0 ]]; then exec "$OMARCHY_NATIVE_PATH/bin/omarchy-setup-affinity" --uninstall; fi
+    python3 "$helper" plan
+    gum confirm 'Back up your data and uninstall Affinity?' || exit 0
+    ;;
+  *) echo 'Unknown option.' >&2; exit 2 ;;
+esac
+affinity_lock -x
+python3 "$helper" idle
+# Authenticate in the visible terminal before output is captured.
+if [[ -f $AFFINITY_STATE/ownership.json ]] && jq -e '.packages | length > 0' "$AFFINITY_STATE/ownership.json" >/dev/null; then
+  sudo -v
 fi
-pkill -f "$AFFINITY_PREFIX" 2>/dev/null || true
-sleep 1
-
-rm -rf "$AFFINITY_ROOT" "$AFFINITY_CACHE"
-
-# Launcher, icon, and file associations.
-rm -f "$AFFINITY_DESKTOP_FILE" "$AFFINITY_ICON_FILE" "$AFFINITY_MIME_FILE"
-mimeapps="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
-if [[ -f $mimeapps ]]; then
-  sed -i '/=affinity\.desktop;\?$/d' "$mimeapps"
-fi
-update-mime-database "${XDG_DATA_HOME:-$HOME/.local/share}/mime" &>/dev/null || true
-update-desktop-database "${AFFINITY_DESKTOP_FILE%/*}" &>/dev/null || true
-gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" &>/dev/null || true
-
-# Hyprland rules: drop the fragment and the require line the installer appended.
-rm -f "$AFFINITY_HYPR_FILE"
-if [[ -f $AFFINITY_HYPR_CONFIG ]]; then
-  sed -i '/-- omarchy-affinity$/d' "$AFFINITY_HYPR_CONFIG"
-fi
-
-# Menu rows: the exact lines the installer appended.
-if [[ -f $AFFINITY_MENU_FILE ]]; then
-  sed -i \
-    -e '/"install\.creative\.affinity"/d' \
-    -e '/"remove\.creative\.affinity"/d' \
-    -e '/"install\.creative": {"icon":"󰃣","label":"Creative"},$/d' \
-    -e '/"remove\.creative": {"icon":"󰃣","label":"Creative","title":"Remove"},$/d' \
-    "$AFFINITY_MENU_FILE"
-fi
-
-if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE-} ]]; then
-  hyprctl reload >/dev/null 2>&1 || true
-fi
-
-echo
-echo "Affinity, its Wine prefix, and the patched Wine runner have been removed."
-
-if omarchy-pkg-present winetricks; then
-  echo
-  if gum confirm "Also remove winetricks and cabextract? Lutris and other Wine setups use them too."; then
-    omarchy-pkg-drop winetricks cabextract
-  fi
-fi
+affinity_ui_start 'Uninstall Affinity' 2 "$HOME/Affinity Backups/logs/uninstall-$(date +%Y%m%d-%H%M%S).log"
+affinity_step 'Preserving your work and removing installed files' python3 "$helper" remove
+refresh() {
+  update-mime-database "${XDG_DATA_HOME:-$HOME/.local/share}/mime" || true
+  update-desktop-database "${AFFINITY_DESKTOP_FILE%/*}" || true
+  gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" || true
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE-} ]]; then hyprctl reload; fi
+}
+affinity_step 'Refreshing the app launcher' refresh
+printf '\nAffinity removed. Your recovery data is in ~/Affinity Backups.\n'

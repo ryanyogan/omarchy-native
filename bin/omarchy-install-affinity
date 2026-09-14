@@ -1,33 +1,38 @@
 #!/bin/bash
-
-# omarchy:summary=Install Affinity (Canva's unified Photo/Designer/Publisher app) under a patched Wine with DXVK, plus launcher, file associations, and Hyprland rules.
+# omarchy:summary=Install or repair Affinity with themed progress and recoverable setup.
+# omarchy:args=[--terminal]
 # omarchy:requires-sudo=true
-
-set -e
-
+set -euo pipefail
+umask 077
 # shellcheck source=omarchy-affinity-env
 source "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/omarchy-affinity-env"
-
-echo "Installing Affinity..."
-
-# ---------------------------------------------------------------------------
-# Packages. The prefix runs on the vendored ElementalWarrior Wine, but that
-# build dlopens the same libraries the Arch wine package depends on, so `wine`
-# is the runtime-library carrier. wine-staging (Lutris) provides the same set
-# and conflicts with wine, so either satisfies it.
-if ! pacman -Qq wine wine-staging 2>/dev/null | grep -qx 'wine\|wine-staging'; then
-  omarchy-pkg-add wine
-fi
-omarchy-pkg-add winetricks cabextract unzip vulkan-icd-loader
-
+# shellcheck source=omarchy-affinity-ui
+source "$OMARCHY_NATIVE_PATH/bin/omarchy-affinity-ui"
+case "${1-}" in
+  -h|--help) echo 'Usage: omarchy-install-affinity [--terminal]'; exit 0 ;;
+  --terminal) exec "$OMARCHY_NATIVE_PATH/bin/omarchy-setup-affinity" --install ;;
+  '') ;;
+  *) echo 'Unknown option.' >&2; exit 2 ;;
+esac
+helper="$OMARCHY_NATIVE_PATH/libexec/affinity-lifecycle.py"
+affinity_lock -x
+python3 "$helper" check
+python3 "$helper" idle
+python3 "$helper" capture
+if python3 "$helper" needs-packages; then sudo -v; fi
+affinity_wine_env
 # ---------------------------------------------------------------------------
 # Patched Wine runner, pinned by checksum and replaced when the version bumps.
 download() {
   local url="$1" dest="$2"
+  local resume=(--continue-at -)
+  [[ ${3-} == fresh ]] && resume=()
   mkdir -p "${dest%/*}"
-  curl --fail --location --retry 3 --continue-at - --progress-bar "$url" --output "$dest"
+  curl --fail --location --retry 3 "${resume[@]}" --silent --show-error "$url" --output "$dest.part"
+  mv "$dest.part" "$dest"
 }
 
+install_runner() {
 vendored_version=""
 if [[ -f $AFFINITY_WINE/.omarchy-version ]]; then
   read -r vendored_version <"$AFFINITY_WINE/.omarchy-version"
@@ -52,15 +57,39 @@ if [[ $vendored_version != "$AFFINITY_WINE_VERSION" ]]; then
   mkdir -p "$AFFINITY_ROOT"
   staging=$(mktemp -d "$AFFINITY_ROOT/wine-staging-XXXXXX")
   tar -xJf "$archive" -C "$staging"
-  rm -rf "$AFFINITY_WINE"
-  mv "$staging/$AFFINITY_WINE_ARCHIVE_DIR" "$AFFINITY_WINE"
+  [[ -x $staging/$AFFINITY_WINE_ARCHIVE_DIR/bin/wine ]] || { echo 'Wine archive is incomplete.' >&2; return 1; }
+  previous="$AFFINITY_ROOT/wine-previous"
+  [[ ! -e $previous ]] || { echo 'An interrupted runner replacement needs recovery from wine-previous.' >&2; return 1; }
+  if [[ -d $AFFINITY_WINE ]]; then mv "$AFFINITY_WINE" "$previous"; fi
+  if ! mv "$staging/$AFFINITY_WINE_ARCHIVE_DIR" "$AFFINITY_WINE"; then
+    if [[ -d $previous ]]; then mv "$previous" "$AFFINITY_WINE"; fi
+    return 1
+  fi
+  if [[ -d $previous ]]; then rm -rf "$previous"; fi
   rmdir "$staging"
   printf '%s\n' "$AFFINITY_WINE_VERSION" >"$AFFINITY_WINE/.omarchy-version"
 fi
 
+}
+
 # ---------------------------------------------------------------------------
 # Prefix. Each step is skipped when its result is already in place, so a rerun
 # after a crash or Ctrl-C picks up where it stopped.
+install_winetricks() {
+  if [[ -n ${OMARCHY_AFFINITY_WINETRICKS-} ]]; then
+    [[ -x $AFFINITY_WINETRICKS ]] || { echo 'The custom winetricks executable is missing.' >&2; return 1; }
+    return 0
+  fi
+  if ! sha256sum --status --check <<<"$AFFINITY_WINETRICKS_SHA256  $AFFINITY_WINETRICKS"; then
+    download "$AFFINITY_WINETRICKS_URL" "$AFFINITY_WINETRICKS" fresh
+    sha256sum --status --check <<<"$AFFINITY_WINETRICKS_SHA256  $AFFINITY_WINETRICKS" || {
+      echo 'Winetricks checksum mismatch; refusing to run it.' >&2; return 1;
+    }
+  fi
+  chmod 700 "$AFFINITY_WINETRICKS"
+}
+
+install_prefix() {
 affinity_wine_env
 mkdir -p "$AFFINITY_STATE"
 
@@ -70,66 +99,52 @@ if [[ ! -f $AFFINITY_PREFIX/system.reg ]]; then
   mkdir -p "$AFFINITY_PREFIX"
   # No Mono/Gecko: winetricks installs real .NET next, and the Gecko dialog
   # would be the only prompt in the whole run.
-  WINEDLLOVERRIDES="mscoree=;mshtml=;$WINEDLLOVERRIDES" wineboot --update >/dev/null 2>&1
+  WINEDLLOVERRIDES="mscoree=;mshtml=;$WINEDLLOVERRIDES" wineboot --update
 fi
 
-# winetricks records every finished verb in the prefix's winetricks.log, so
-# that log is the idempotency marker.
-verb_done() {
-  grep -qxF "$1" "$AFFINITY_PREFIX/winetricks.log" 2>/dev/null
+# Winetricks temporarily replaces WINEDLLOVERRIDES while installing .NET.
+# Persist this override before those steps so its Wine processes cannot create
+# generic launcher entries and MIME associations in the user's desktop.
+"$WINE" reg add 'HKEY_CURRENT_USER\Software\Wine\DllOverrides' /v winemenubuilder.exe /t REG_SZ /d '' /f
+
+ }
+
+install_verb() {
+  local verb="$1"
+  grep -qxF "$verb" "$AFFINITY_PREFIX/winetricks.log" 2>/dev/null && return 0
+  export WINETRICKS_GUI=none W_CACHE="$AFFINITY_CACHE/winetricks"
+  "$AFFINITY_WINETRICKS" --unattended "$verb" || grep -qxF "$verb" "$AFFINITY_PREFIX/winetricks.log"
 }
 
-export WINETRICKS_GUI=none
-announced=0
-for verb in "${AFFINITY_WINETRICKS_VERBS[@]}"; do
-  if verb_done "$verb"; then
-    continue
-  fi
-
-  if (( ! announced )); then
-    echo
-    echo "Installing the Windows runtime pieces with winetricks (dotnet48 alone takes 5-10 minutes)..."
-    announced=1
-  fi
-  echo "  $verb"
-  log="$AFFINITY_STATE/winetricks-${verb//=/-}.log"
-  if ! winetricks --unattended "$verb" >"$log" 2>&1 && ! verb_done "$verb"; then
-    echo "winetricks $verb failed; see $log" >&2
-    exit 1
-  fi
-done
-
+configure_prefix() {
 # Registry tweaks. Keying them on a marker keeps reruns quiet.
 if [[ ! -f $AFFINITY_STATE/registry-done ]]; then
   echo
   echo "Applying Wine registry settings..."
   # Stay on XWayland: Hyprland's rules key on the affinity.exe X11 class, and
   # Wine's Wayland driver is not what upstream tests against.
-  "$WINE" reg add 'HKEY_CURRENT_USER\Software\Wine\Drivers' /v Graphics /t REG_SZ /d x11 /f >/dev/null 2>&1
+  "$WINE" reg add 'HKEY_CURRENT_USER\Software\Wine\Drivers' /v Graphics /t REG_SZ /d x11 /f
   # Dark Win32 chrome for the few native dialogs Affinity still opens.
-  "$AFFINITY_WINE/bin/regedit" "$OMARCHY_NATIVE_PATH/default/affinity/wine-dark-theme.reg" >/dev/null 2>&1
+  "$AFFINITY_WINE/bin/regedit" "$OMARCHY_NATIVE_PATH/default/affinity/wine-dark-theme.reg"
   touch "$AFFINITY_STATE/registry-done"
 fi
 affinity_apply_dpi
 
+}
+
 # ---------------------------------------------------------------------------
 # The app. Canva's installer is a normal Windows wizard with no silent switch,
 # so this is the one place the user clicks through anything.
+install_app() {
 if [[ ! -f $AFFINITY_EXE ]]; then
   installer="$AFFINITY_CACHE/Affinity-x64.exe"
-  if [[ ! -s $installer ]]; then
+  if [[ ! -s $installer || ! -f $installer.complete ]]; then
     echo
     echo "Downloading the Affinity installer..."
-    download "$AFFINITY_INSTALLER_URL" "$installer"
+    download "$AFFINITY_INSTALLER_URL" "$installer" fresh
+    touch "$installer.complete"
   fi
 
-  cat <<'MSG'
-
-Launching the Affinity setup wizard. Click through it with the defaults; the
-install path inside the prefix is fine. If the wizard reports an error at the
-very end, choose "No" / "Close" so it finishes rather than rolls back.
-
-MSG
   log="$AFFINITY_STATE/affinity-setup.log"
   "$WINE" "$installer" >"$log" 2>&1 || true
   wineserver --wait
@@ -140,9 +155,12 @@ MSG
     exit 1
   fi
 
-  rm -f "$installer"
+  rm -f "$installer" "$installer.complete"
 fi
 
+}
+
+install_desktop() {
 # ---------------------------------------------------------------------------
 # Desktop integration: icon, launcher, file associations.
 install -Dm644 "$OMARCHY_NATIVE_PATH/default/applications/icons/affinity.svg" "$AFFINITY_ICON_FILE"
@@ -153,7 +171,9 @@ update-desktop-database "${AFFINITY_DESKTOP_FILE%/*}" &>/dev/null || true
 
 install -Dm644 "$OMARCHY_NATIVE_PATH/default/mime/omarchy-affinity.xml" "$AFFINITY_MIME_FILE"
 update-mime-database "${AFFINITY_MIME_FILE%/packages/*}" &>/dev/null || true
-xdg-mime default affinity.desktop "${AFFINITY_MIME_TYPES[@]}"
+# Register Open With support, but do not make a known-broken document handoff
+# the default. Restore any associations taken by the previous installer.
+python3 "$helper" restore-mime
 
 # Hyprland rules: a fragment in ~/.config/hypr plus one require line at the end
 # of the user's hyprland.lua, where Omarchy invites personal additions.
@@ -165,36 +185,28 @@ if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE-} ]]; then
   hyprctl reload >/dev/null 2>&1 || true
 fi
 
-# Omarchy menu rows under Install > Creative and Remove > Creative, appended to
-# the user's menu extension file (new ids append; the parser tolerates the
-# trailing comma). The exact lines are what omarchy-remove-affinity deletes.
-mkdir -p "${AFFINITY_MENU_FILE%/*}"
-if [[ ! -f $AFFINITY_MENU_FILE ]]; then
-  printf '{\n}\n' >"$AFFINITY_MENU_FILE"
+}
+
+affinity_ui_start 'Install Affinity' "$(( ${#AFFINITY_WINETRICKS_VERBS[@]} + 9 ))" "$AFFINITY_STATE/install-$(date +%Y%m%d-%H%M%S).log"
+if [[ ! -f $AFFINITY_EXE ]]; then
+  printf '\n  Complete the Affinity setup window when it appears.\n  Keep the default install location.\n\n'
 fi
-if ! grep -q '"install\.creative\.affinity"' "$AFFINITY_MENU_FILE"; then
-  rows=$(grep -E '^  "' "$OMARCHY_NATIVE_PATH/default/omarchy/omarchy-menu.jsonc")
-  # Insert before the final closing brace so the file stays one JSON object.
-  # The rows go in via the environment: awk -v would eat their backslashes.
-  ROWS="$rows" awk '
-    { lines[NR] = $0 }
-    END {
-      last = NR
-      while (last > 0 && lines[last] !~ /^[[:space:]]*}[[:space:]]*$/) last--
-      for (i = 1; i < last; i++) print lines[i]
-      print ENVIRON["ROWS"]
-      for (i = last; i <= NR; i++) print lines[i]
-    }' "$AFFINITY_MENU_FILE" >"$AFFINITY_MENU_FILE.tmp"
-  mv "$AFFINITY_MENU_FILE.tmp" "$AFFINITY_MENU_FILE"
-fi
-
-cat <<EOM
-
-Affinity is installed. Find it in your app launcher (search "Affinity"), open
-an .afphoto/.afdesign/.afpub/.psd from the file manager, or run:
-
-  omarchy-launch-affinity
-
-Leave Preferences > Performance > Hardware Acceleration (OpenCL) off; rendering
-goes through DXVK/Vulkan already. See docs/affinity.md for what to expect.
-EOM
+affinity_step 'Preparing system dependencies' python3 "$helper" packages
+affinity_step 'Preparing the Wine runtime' install_runner
+affinity_step 'Preparing the setup tools' install_winetricks
+affinity_step 'Creating your private app environment' install_prefix
+for verb in "${AFFINITY_WINETRICKS_VERBS[@]}"; do
+  case "$verb" in
+    dotnet48) label='Preparing the app framework · allow 10 minutes' ;;
+    corefonts|tahoma) label='Installing typefaces' ;;
+    dxvk|renderer=vulkan) label='Preparing Vulkan rendering' ;;
+    *) label='Installing Windows libraries' ;;
+  esac
+  affinity_step "$label" install_verb "$verb"
+done
+affinity_step 'Matching your display and desktop' configure_prefix
+affinity_step 'Installing Affinity · complete its setup window' install_app
+affinity_step 'Adding the app launcher and file types' install_desktop
+affinity_step 'Removing setup-only files' python3 "$helper" prune-runtime
+affinity_step 'Recording recovery information' python3 "$helper" seal
+printf '\n\n  Affinity is ready. Open it from your app launcher.\n\n  ✓ Display and menus configured\n  ✓ Recovery information saved\n'

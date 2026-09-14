@@ -1,0 +1,117 @@
+#!/bin/bash
+# omarchy:summary=Shared terminal presentation and operation lock for Affinity (sourced).
+# omarchy:hidden=true
+
+# shellcheck disable=SC2034
+AFFINITY_STEP=0
+AFFINITY_TOTAL=1
+AFFINITY_CHILD=""
+AFFINITY_PRETTY=0
+AFFINITY_COLUMNS=80
+AFFINITY_ACCENT=""
+
+# A stable lock outside the installation survives its removal. Launchers take
+# a shared lock; setup/removal take an exclusive lock. Never unlink a held lock.
+affinity_lock() {
+  local lock_dir="${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/omarchy-affinity-locks" key
+  mkdir -p "$lock_dir"
+  key=$(printf '%s' "$(readlink -m -- "$AFFINITY_ROOT")" | sha256sum | cut -c1-16)
+  exec 9>"$lock_dir/$key.lock"
+  flock -n "$1" 9 || { echo "Affinity is running or another setup operation is active. Close it and retry." >&2; exit 1; }
+}
+
+affinity_ui_start() {
+  local title="$1"
+  AFFINITY_TOTAL="$2"
+  AFFINITY_LOG="$3"
+  mkdir -p "${AFFINITY_LOG%/*}"
+  touch "$AFFINITY_LOG"
+  chmod 600 "$AFFINITY_LOG"
+  if [[ -t 1 ]] && command -v gum >/dev/null; then
+    AFFINITY_PRETTY=1
+    unset NO_COLOR
+    export CLICOLOR_FORCE=1
+    AFFINITY_COLUMNS=$(tput cols 2>/dev/null || echo 80)
+    # shellcheck disable=SC1090,SC1091
+    if command -v omarchy-restart-gum >/dev/null; then source "$(command -v omarchy-restart-gum)"; fi
+    local accent="${GUM_CONFIRM_PROMPT_FOREGROUND:-#7daea3}"
+    if [[ $accent =~ ^#[0-9a-fA-F]{6}$ ]]; then
+      printf -v AFFINITY_ACCENT '\033[38;2;%d;%d;%dm' "$((16#${accent:1:2}))" "$((16#${accent:3:2}))" "$((16#${accent:5:2}))"
+    fi
+    printf '\n'
+    gum style --foreground "${GUM_CONFIRM_PROMPT_FOREGROUND:-6}" --bold --padding '0 2' 'A F F I N I T Y' 'FOR OMARCHY'
+    gum style --padding '0 2' "$title"
+    printf '\n'
+    printf '\033[?25l'
+  else
+    printf '%s\n' "$title"
+  fi
+  trap affinity_ui_exit EXIT
+  trap 'exit 130' INT TERM
+}
+
+affinity_ui_exit() {
+  local status=$?
+  if [[ -n $AFFINITY_CHILD ]]; then
+    python3 - "$AFFINITY_CHILD" <<'PYCODE'
+import os, signal, sys
+from pathlib import Path
+parents = {}
+for entry in Path('/proc').glob('[0-9]*/stat'):
+    try:
+        fields = entry.read_text().rsplit(')', 1)[1].split()
+        parents[int(entry.parent.name)] = int(fields[1])
+    except (OSError, ValueError, IndexError):
+        pass
+targets = {int(sys.argv[1])}
+while True:
+    expanded = targets | {pid for pid, parent in parents.items() if parent in targets}
+    if expanded == targets: break
+    targets = expanded
+for pid in reversed(sorted(targets)):
+    try: os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError: pass
+PYCODE
+    wait "$AFFINITY_CHILD" 2>/dev/null || true
+  fi
+  if (( AFFINITY_PRETTY )); then printf '\033[?25h'; fi
+  if (( status != 0 )); then
+    printf '\nOperation stopped. Review the details before retrying.\nDetails: %s\n' "$AFFINITY_LOG" >&2
+    # Show one actionable line, never a wall of Wine output.
+    tail -n 1 "$AFFINITY_LOG" >&2
+  fi
+}
+
+affinity_bar() {
+  local label="$1" frame="$2" width=24 filled bar empty columns available
+  columns=$AFFINITY_COLUMNS
+  available=$((columns - width - 14))
+  if (( available < 12 )); then width=12; available=$((columns - 26)); fi
+  if (( ${#label} > available )); then label="${label:0:available-1}…"; fi
+  filled=$((AFFINITY_STEP * width / AFFINITY_TOTAL))
+  printf -v bar '%*s' "$filled" ''; bar=${bar// /━}
+  printf -v empty '%*s' "$((width - filled))" ''; empty=${empty// /─}
+  printf '\r\033[2K  %b%s %s\033[0m%s  %3d%%  %s' "$AFFINITY_ACCENT" "$frame" "$bar" "$empty" "$((AFFINITY_STEP * 100 / AFFINITY_TOTAL))" "$label"
+}
+
+affinity_step() {
+  local title="$1" status=0 tick=0
+  shift
+  printf '\n[%s] %s\n' "$(date -Is)" "$title" >>"$AFFINITY_LOG"
+  if (( ! AFFINITY_PRETTY )); then printf '[%s/%s] %s\n' "$((AFFINITY_STEP + 1))" "$AFFINITY_TOTAL" "$title"; fi
+  ( "$@" ) >>"$AFFINITY_LOG" 2>&1 &
+  AFFINITY_CHILD=$!
+  while kill -0 "$AFFINITY_CHILD" 2>/dev/null; do
+    if (( AFFINITY_PRETTY )); then
+      local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+      affinity_bar "$title" "${frames[tick % 10]}"
+      tick=$((tick + 1))
+    fi
+    sleep 0.12
+  done
+  wait "$AFFINITY_CHILD" || status=$?
+  AFFINITY_CHILD=""
+  (( status == 0 )) || return "$status"
+  AFFINITY_STEP=$((AFFINITY_STEP + 1))
+  if (( AFFINITY_PRETTY )); then affinity_bar "$title" '✓'; fi
+}

@@ -1,0 +1,35 @@
+#!/bin/bash
+# omarchy:summary=Open the themed Affinity installer and uninstaller in an Omarchy terminal.
+# omarchy:args=[--install|--uninstall]
+set -euo pipefail
+self=$(readlink -f "${BASH_SOURCE[0]}")
+case "${1-}" in
+  -h|--help) echo 'Usage: omarchy-setup-affinity [--install|--uninstall]'; exit 0 ;;
+  --terminal) shift ;;
+  *)
+    command -v xdg-terminal-exec >/dev/null || { echo 'xdg-terminal-exec is required.' >&2; exit 1; }
+    terminal_log="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-native/terminal.log"
+    mkdir -p "${terminal_log%/*}"
+    exec xdg-terminal-exec --app-id=org.omarchy.terminal --title=Affinity -e "$self" --terminal "$@" 2>"$terminal_log"
+    ;;
+esac
+# shellcheck source=omarchy-affinity-env
+source "${self%/*}/omarchy-affinity-env"
+# shellcheck disable=SC1090,SC1091
+if command -v omarchy-restart-gum >/dev/null; then source "$(command -v omarchy-restart-gum)"; fi
+choice="${1-}"
+if [[ -z $choice ]]; then
+  printf '\n'
+  gum style --bold --foreground "${GUM_CONFIRM_PROMPT_FOREGROUND:-6}" --padding '1 2' 'A F F I N I T Y' 'FOR OMARCHY'
+  choice=$(gum choose --header 'Install, repair, or remove Affinity' 'Install / repair' 'Uninstall' 'Cancel') || exit 0
+fi
+status=0
+case "$choice" in
+  --install|'Install / repair') "$OMARCHY_NATIVE_PATH/bin/omarchy-install-affinity" || status=$? ;;
+  --uninstall|Uninstall) "$OMARCHY_NATIVE_PATH/bin/omarchy-remove-affinity" || status=$? ;;
+  Cancel) exit 0 ;;
+  *) echo 'Unknown option. Use --install or --uninstall.' >&2; exit 2 ;;
+esac
+printf '\n'
+read -r -p 'Press Enter to close. ' _ || true
+exit "$status"

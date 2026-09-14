@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Live regression check for displaced Affinity menus.
+
+Run manually with Affinity open, its home/dialog windows dismissed, English UI,
+and a single 2x monitor at (0, 0). This takes pointer/keyboard focus briefly;
+leave the pointer alone until it finishes. It opens menus without editing or
+saving documents. Requires hyprctl, libX11, and libXtst. No Wine mocks are used.
+"""
+
+import ctypes as c
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+
+
+def query(command):
+    return json.loads(subprocess.check_output(["hyprctl", command, "-j"]))
+
+
+def dispatch(expression):
+    subprocess.run(
+        ["hyprctl", "eval", f"hl.dispatch({expression})"], check=True, stdout=subprocess.DEVNULL
+    )
+
+
+def check(condition, description):
+    if not condition:
+        raise RuntimeError(description)
+    print(f"ok - {description}", flush=True)
+
+
+def menus():
+    return [
+        window
+        for window in query("clients")
+        if window["class"] == "affinity.exe"
+        and window["floating"]
+        and window["title"] == ""
+    ]
+
+
+monitors = query("monitors")
+check(
+    len(monitors) == 1
+    and monitors[0]["scale"] == 2
+    and monitors[0]["x"] == monitors[0]["y"] == 0,
+    "single 2x monitor matches the hardware regression fixture",
+)
+zero_scaling = json.loads(subprocess.check_output(
+    ["hyprctl", "getoption", "xwayland:force_zero_scaling", "-j"]
+))
+check(zero_scaling.get("bool") is True, "XWayland uses physical coordinates")
+data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+affinity_root = Path(os.environ.get("OMARCHY_AFFINITY_ROOT", data_home / "omarchy-affinity"))
+check(
+    (affinity_root / "state/dpi").read_text().strip() == "192",
+    "Wine uses the 192 DPI regression fixture",
+)
+main_windows = [
+    window
+    for window in query("clients")
+    if window["class"] == "affinity.exe" and not window["floating"]
+]
+check(len(main_windows) == 1, "one tiled Affinity main window is open")
+main = main_windows[0]
+check(main["xwayland"], "Affinity uses XWayland")
+check(not menus(), "home window and other untitled dialogs are dismissed")
+
+x11 = c.CDLL("libX11.so.6")
+xtst = c.CDLL("libXtst.so.6")
+x11.XOpenDisplay.argtypes = [c.c_char_p]
+x11.XOpenDisplay.restype = c.c_void_p
+x11.XFlush.argtypes = [c.c_void_p]
+x11.XCloseDisplay.argtypes = [c.c_void_p]
+xtst.XTestFakeButtonEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
+xtst.XTestFakeMotionEvent.argtypes = [
+    c.c_void_p, c.c_int, c.c_int, c.c_int, c.c_ulong
+]
+display = x11.XOpenDisplay(None)
+check(bool(display), "X display is available")
+original_pointer = query("cursorpos")
+
+
+def pointer(x, y, click=False):
+    dispatch(f"hl.dsp.cursor.move({{x={x},y={y}}})")
+    # A compositor warp alone does not deliver XWayland pointer motion. Send
+    # XTest motion in the physical coordinates used by force_zero_scaling.
+    xtst.XTestFakeMotionEvent(display, -1, x * 2, y * 2, 0)
+    x11.XFlush(display)
+    time.sleep(0.1)
+    if click:
+        xtst.XTestFakeButtonEvent(display, 1, 1, 0)
+        xtst.XTestFakeButtonEvent(display, 1, 0, 0)
+        x11.XFlush(display)
+
+
+def escape():
+    dispatch('hl.dsp.send_shortcut({mods="",key="Escape"})')
+    time.sleep(0.1)
+
+
+try:
+    x, y = main["at"]
+    for attempt in range(1, 4):
+        dispatch(f'hl.dsp.focus({{window="address:{main["address"]}"}})')
+        pointer(x + 62, y + 15, click=True)
+        time.sleep(0.4)
+        opened = menus()
+        check(len(opened) == 1, f"File menu stays open, attempt {attempt}")
+        menu = opened[0]
+        mx, my = menu["at"]
+        mw, _ = menu["size"]
+        check(
+            x <= mx <= x + 120 and y + 20 <= my <= y + 65,
+            f"File menu anchors to its label at {menu['at']}, attempt {attempt}",
+        )
+        if attempt == 3:
+            pointer(mx + 80, my + 35)  # File > Studios
+            time.sleep(0.5)
+            children = [w for w in menus() if w["address"] != menu["address"]]
+            check(len(children) == 1, "hovering Studios opens its submenu")
+            child = children[0]
+            cx, cy = child["at"]
+            cw, _ = child["size"]
+            check(
+                min(abs(cx - (mx + mw)), abs(cx + cw - mx)) <= 12
+                and abs(cy - (my + 25)) <= 20,
+                "submenu stays adjacent to its parent row",
+            )
+            pointer(cx + 50, cy + 38)
+            time.sleep(0.3)
+            check(
+                any(w["address"] == child["address"] for w in menus()),
+                "submenu stays open when the pointer enters it",
+            )
+            escape()
+        escape()
+finally:
+    escape()
+    dispatch(
+        f'hl.dsp.cursor.move({{x={original_pointer["x"]},y={original_pointer["y"]}}})'
+    )
+    x11.XCloseDisplay(display)
+
+print("all live Affinity menu checks passed")

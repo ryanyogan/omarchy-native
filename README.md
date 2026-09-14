@@ -1,23 +1,40 @@
 # omarchy-native
 
-Run the Windows builds of Mac-refugee creative apps on [Omarchy](https://omarchy.org) and make them feel native in Hyprland. Phase 1: the Affinity suite.
+Affinity on Omarchy, with a private Wine runtime, correct Hyprland popup behavior,
+and a terminal installer that follows your desktop theme.
 
-```
-omarchy-install-affinity     # patched Wine + DXVK prefix, launcher, .afphoto/.afdesign/.afpub/.psd, Hyprland rules, menu rows
-omarchy-launch-affinity      # what the launcher entry runs; accepts files
-omarchy-remove-affinity      # everything gone again
-```
-
-Read [`docs/affinity.md`](docs/affinity.md) first: what gets installed, the runner decision, what is Wine-fragile, how to report bugs, and the licence situation. [`NOTES.md`](NOTES.md) is the inventory of what upstream AffinityOnLinux does that the installer was drafted from.
-
-## Using this repo
-
-The tree mirrors Omarchy's (`bin/`, `default/applications`, `default/hypr/apps`, `default/omarchy`) so files can move into `basecamp/omarchy` unchanged. Until then, put `bin/` on your PATH or symlink the three commands into `~/.local/bin`; the commands find the rest of the repo relative to themselves (`OMARCHY_NATIVE_PATH` overrides that).
-
-```
+```sh
 git clone https://github.com/ryanyogan/omarchy-native ~/.local/share/omarchy-native
+mkdir -p ~/.local/bin
 ln -s ~/.local/share/omarchy-native/bin/omarchy-*-affinity ~/.local/bin/
-omarchy-install-affinity
+omarchy-setup-affinity
 ```
 
-`test/affinity` runs the static checks (no Wine or Hyprland needed).
+`omarchy-setup-affinity` opens an Omarchy terminal with **Install / repair** and
+**Uninstall** options. Progress follows completed setup steps; detailed output
+is saved to a private log. The Affinity vendor wizard still needs your clicks.
+Menu-bar integration is deferred.
+
+```sh
+omarchy-setup-affinity --install     # open the installer terminal
+omarchy-launch-affinity              # launch the app
+omarchy-remove-affinity --dry-run    # inspect removal and dependency ownership
+omarchy-setup-affinity --uninstall   # back up data and remove the installation
+```
+
+Removal verifies a backup under `~/Affinity Backups/` before deleting the app's
+private directories. It removes only recorded package additions, retaining any
+that other installed applications still require. Documents outside the Wine
+prefix stay where you saved them. Older installations retain their entire prefix
+in the recovery backup because their original runtime files were not inventoried.
+
+See [installation and compatibility](docs/affinity.md), the
+[local audit](docs/audit.md), and [earlier testing](docs/local-testing.md).
+The [creator workflow](docs/creator-workflow.md) connects Theo's public thumbnail
+examples to our acceptance tests and performance priorities.
+
+Run `test/affinity` for static checks and isolated installer/removal regressions.
+`test/affinity-interactions` exercises real menus on the documented desktop
+fixture; `test/affinity-profile` samples the running prefix's CPU and memory.
+Use `test/affinity-profile --seconds 30 --label baseline-pan-01` to record a
+named workload with monitor/runtime context and a timeline of CPU/memory samples.

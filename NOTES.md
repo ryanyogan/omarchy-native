@@ -1,5 +1,11 @@
 # NOTES: what AffinityOnLinux actually does
 
+> Historical upstream inventory. The later [local audit](docs/audit.md) found
+> Wine's namespace resolver is still a stub despite the generated metadata.
+> The current installer also replaces system Wine/winetricks with runtime
+> library dependencies and a private, pinned setup tool.
+
+
 Extracted from a read of `ryzendew/AffinityOnLinux` (`AffinityScripts/AffinityLinuxInstaller.py`, 19.5k lines; `Affinityv3.sh`; `AffinityWine10.17.sh`; `AffinityUbuntuLauncher.sh`; `docs/*.md`) on 2026-09-13. This is the raw inventory that `bin/omarchy-install-affinity` was drafted against. The decisions taken from it are in `docs/affinity.md`.
 
 ## Runners upstream offers

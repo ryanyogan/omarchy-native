@@ -4,11 +4,22 @@
 -- as transient, which Hyprland floats on its own: the document window is the
 -- only one that opens tiled.
 
+-- The current vendor bootstrap opens setupui.exe, title "Affinity" (observed
+-- on Wine 11.12). Match the title too so unrelated installers are unaffected.
+o.window({ class = "^setupui\\.exe$", title = "^Affinity$" }, {
+  tag = "-default-opacity",
+  opacity = "1 1",
+  float = true,
+  center = true,
+  focus_on_activate = false,
+})
+
 -- Colour work: keep it fully opaque, same as DaVinci Resolve.
 o.window("^affinity( x64)?\\.exe$", { tag = "-default-opacity", opacity = "1 1" })
 
--- Splash and dialogs already float; centre them.
-o.window({ class = "^affinity( x64)?\\.exe$", float = true }, { center = true })
+-- Wine also exposes menus and tool flyouts as floating windows. Preserve their
+-- app-requested positions: centring all floating windows detaches popups from
+-- their controls and makes pointer navigation unreliable.
 
 -- Belt and braces for dialogs Wine forgets to mark transient.
 o.window({

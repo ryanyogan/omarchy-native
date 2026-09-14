@@ -6,34 +6,8 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-TMPDIRS=()
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-make_tmpdir() {
-  local -n dir_ref="$1"
-
-  dir_ref=$(mktemp -d)
-  TMPDIRS+=("$dir_ref")
-}
-
-cleanup() {
-  local dir
-
-  for dir in ${TMPDIRS[@]+"${TMPDIRS[@]}"}; do
-    [[ -d $dir ]] && rm -rf "$dir"
-  done
-
-  return 0
-}
-trap cleanup EXIT
+pass() { printf 'ok - %s\n' "$1"; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # --- Syntax and metadata ----------------------------------------------------
 
@@ -50,14 +24,14 @@ done
 pass "commands are executable"
 
 if command -v shellcheck >/dev/null; then
-  shellcheck -x -P "$ROOT/bin" -s bash "$ROOT"/bin/omarchy-*-affinity "$ROOT"/bin/omarchy-affinity-env || fail "shellcheck"
+  shellcheck -x -P "$ROOT/bin" -s bash "$ROOT"/bin/omarchy-*-affinity "$ROOT"/bin/omarchy-affinity-env "$ROOT"/bin/omarchy-affinity-ui || fail "shellcheck"
   pass "shellcheck clean"
 fi
 
 # --- Shipped files ----------------------------------------------------------
 
 desktop="$ROOT/default/applications/affinity.desktop"
-for key in 'Exec=omarchy-launch-affinity %F' 'Icon=affinity' 'StartupWMClass=affinity.exe' 'MimeType=application/x-affinity-photo;'; do
+for key in 'Exec=omarchy-launch-affinity %F' 'Icon=affinity' 'StartupWMClass=affinity.exe' 'MimeType=application/x-affinity;'; do
   grep -qF "$key" "$desktop" || fail "desktop entry has $key"
 done
 if command -v desktop-file-validate >/dev/null; then
@@ -71,7 +45,7 @@ if command -v xmllint >/dev/null; then
   pass "MIME definition and icon parse"
 fi
 
-for ext in afphoto afdesign afpub; do
+for ext in af afphoto afdesign afpub; do
   grep -q "\*\.$ext" "$ROOT/default/mime/omarchy-affinity.xml" || fail "MIME covers .$ext"
 done
 pass "MIME definition covers Affinity extensions"
@@ -94,175 +68,6 @@ grep -q 'affinity' "$ROOT/default/hypr/apps/affinity.lua" || fail "hyprland frag
 [[ $(head -1 "$ROOT/default/affinity/wine-dark-theme.reg") == "Windows Registry Editor Version 5.00" ]] || fail "reg file starts with the regedit header"
 pass "registry file starts with the regedit header"
 
-# --- Behaviour that runs without Wine ---------------------------------------
-
-make_tmpdir home
-make_tmpdir stubs
-for stub in hyprctl update-mime-database update-desktop-database gtk-update-icon-cache xdg-mime pkill sleep; do
-  printf '#!/bin/bash\nexit 0\n' >"$stubs/$stub"
-  chmod +x "$stubs/$stub"
-done
-printf '#!/bin/bash\nexit 1\n' >"$stubs/omarchy-pkg-present"
-chmod +x "$stubs/omarchy-pkg-present"
-
-output=$(HOME="$home" XDG_DATA_HOME="$home/.local/share" XDG_CONFIG_HOME="$home/.config" \
-  PATH="$stubs:$PATH" "$ROOT/bin/omarchy-launch-affinity" 2>&1) && fail "launch refuses when not installed"
-[[ $output == *"not installed"* ]] || fail "launch explains it is not installed"
-pass "launch refuses cleanly when Affinity is not installed"
-
-output=$(HOME="$home" XDG_DATA_HOME="$home/.local/share" XDG_CONFIG_HOME="$home/.config" \
-  PATH="$stubs:$PATH" bash -c 'source "$1"; affinity_target_dpi' _ "$ROOT/bin/omarchy-affinity-env")
-[[ $output == "96" ]] || fail "dpi falls back to 96 without hyprctl data (got $output)"
-output=$(OMARCHY_AFFINITY_DPI=144 bash -c 'source "$1"; affinity_target_dpi' _ "$ROOT/bin/omarchy-affinity-env")
-[[ $output == "144" ]] || fail "OMARCHY_AFFINITY_DPI pins the dpi"
-pass "dpi resolution falls back and honours the override"
-
-# Menu append/remove round trip, using the installer's own awk block against a
-# user extension file that already has content and comments.
-menu_file="$home/.config/omarchy/extensions/omarchy-menu.jsonc"
-mkdir -p "${menu_file%/*}"
-cat >"$menu_file" <<'JSONC'
-{
-  // user rows
-  "personal": {"icon":"","label":"Personal"},
-  "personal.notes": {"icon":"󰎞","label":"Notes","action":"omarchy-launch-editor ~/notes"},
-}
-JSONC
-rows=$(grep -E '^  "' "$menu")
-ROWS="$rows" awk '
-  { lines[NR] = $0 }
-  END {
-    last = NR
-    while (last > 0 && lines[last] !~ /^[[:space:]]*}[[:space:]]*$/) last--
-    for (i = 1; i < last; i++) print lines[i]
-    print ENVIRON["ROWS"]
-    for (i = last; i <= NR; i++) print lines[i]
-  }' "$menu_file" >"$menu_file.tmp"
-mv "$menu_file.tmp" "$menu_file"
-strip_jsonc "$menu_file" | jq -e 'has("personal.notes") and has("install.creative.affinity") and (."install.creative.affinity".disabled | test("Affinity.exe"))' >/dev/null || fail "menu append keeps the file valid"
-pass "menu rows append into an existing extension file"
-
-HOME="$home" XDG_DATA_HOME="$home/.local/share" XDG_CONFIG_HOME="$home/.config" \
-  PATH="$stubs:$PATH" "$ROOT/bin/omarchy-remove-affinity" >/dev/null </dev/null || fail "remove runs on an empty home"
-strip_jsonc "$menu_file" | jq -e 'has("personal.notes") and (has("install.creative.affinity") | not) and (has("install.creative") | not)' >/dev/null || fail "remove deletes only the Affinity rows"
-pass "remove runs on an empty home and deletes only the Affinity rows"
-
-# The hyprland require line must round-trip too.
-hypr="$home/.config/hypr/hyprland.lua"
-mkdir -p "${hypr%/*}"
-printf 'require("default.hypr.omarchy")\n' >"$hypr"
-# shellcheck disable=SC1090
-source "$ROOT/bin/omarchy-affinity-env"
-printf '\n%s\n' "$AFFINITY_HYPR_REQUIRE" >>"$hypr"
-grep -qF -- '-- omarchy-affinity' "$hypr" || fail "require line appended"
-sed -i '/-- omarchy-affinity$/d' "$hypr"
-[[ $(<"$hypr") == 'require("default.hypr.omarchy")' ]] || fail "require line removed cleanly"
-pass "hyprland require line round-trips"
-
-# --- Mocked install -> rerun -> remove round trip -----------------------------
-# Stub Wine, winetricks, curl, and the package helpers so the installer's control
-# flow (markers, idempotency, integration files) runs end to end without Wine.
-
-make_tmpdir mock_home
-mock_root="$mock_home/.local/share/omarchy/affinity"
-mock_wine="$mock_root/wine"
-mkdir -p "$mock_wine/bin" "$mock_home/.config/hypr" "$mock_home/.cache" "$stubs/mock"
-printf '11.12\n' >"$mock_wine/.omarchy-version"
-printf 'require("default.hypr.omarchy")\n' >"$mock_home/.config/hypr/hyprland.lua"
-
-cat >"$mock_wine/bin/wine" <<'STUB'
-#!/bin/bash
-# reg add: no-op. Running the installer .exe: "install" Affinity into the prefix.
-if [[ $1 == "reg" ]]; then exit 0; fi
-if [[ $1 == *.exe ]]; then
-  mkdir -p "$WINEPREFIX/drive_c/Program Files/Affinity/Affinity"
-  touch "$WINEPREFIX/drive_c/Program Files/Affinity/Affinity/Affinity.exe"
-  exit 0
-fi
-exit 0
-STUB
-cat >"$mock_wine/bin/wineboot" <<'STUB'
-#!/bin/bash
-mkdir -p "$WINEPREFIX" && touch "$WINEPREFIX/system.reg"
-STUB
-for stub in wineserver winecfg regedit; do
-  printf '#!/bin/bash\nexit 0\n' >"$mock_wine/bin/$stub"
-done
-printf '#!/bin/bash\nprintf "Z:%%s\\n" "$2"\n' >"$mock_wine/bin/winepath"
-chmod +x "$mock_wine"/bin/*
-
-cat >"$stubs/mock/winetricks" <<'STUB'
-#!/bin/bash
-echo "$*" >>"$WINEPREFIX/winetricks-calls"
-printf '%s\n' "${@: -1}" >>"$WINEPREFIX/winetricks.log"
-STUB
-cat >"$stubs/mock/curl" <<'STUB'
-#!/bin/bash
-# Only the installer download reaches curl in this mock (Wine is pre-vendored).
-for ((i = 1; i <= $#; i++)); do
-  if [[ ${!i} == "--output" ]]; then
-    j=$((i + 1))
-    mkdir -p "$(dirname "${!j}")"
-    printf 'installer' >"${!j}"
-  fi
-done
-exit 0
-STUB
-printf '#!/bin/bash\nexit 1\n' >"$stubs/mock/pacman"
-printf '#!/bin/bash\necho "$*" >>"$OMARCHY_TEST_PKG_LOG"\n' >"$stubs/mock/omarchy-pkg-add"
-printf '#!/bin/bash\nexit 0\n' >"$stubs/mock/gum"
-chmod +x "$stubs"/mock/*
-
-run_mock() {
-  HOME="$mock_home" XDG_DATA_HOME="$mock_home/.local/share" XDG_CONFIG_HOME="$mock_home/.config" \
-    XDG_CACHE_HOME="$mock_home/.cache" OMARCHY_TEST_PKG_LOG="$mock_home/pkg.log" \
-    HYPRLAND_INSTANCE_SIGNATURE= PATH="$stubs/mock:$stubs:$PATH" "$@"
-}
-
-run_mock "$ROOT/bin/omarchy-install-affinity" >"$mock_home/install.log" 2>&1 </dev/null || {
-  cat "$mock_home/install.log" >&2
-  fail "mocked install completes"
-}
-pass "mocked install completes"
-
-[[ -f $mock_root/prefix/system.reg ]] || fail "prefix was created"
-grep -qx 'wine' "$mock_home/pkg.log" || fail "wine package requested when neither wine nor wine-staging is present"
-grep -q 'winetricks cabextract unzip vulkan-icd-loader' "$mock_home/pkg.log" || fail "winetricks and helpers requested"
-for verb in dotnet48 corefonts vcrun2022 msxml3 msxml6 tahoma dxvk renderer=vulkan win11; do
-  grep -qxF "$verb" "$mock_root/prefix/winetricks.log" || fail "winetricks verb ran: $verb"
-done
-grep -q -- '--unattended' "$mock_root/prefix/winetricks-calls" || fail "winetricks ran unattended"
-[[ -f "$mock_root/prefix/drive_c/Program Files/Affinity/Affinity/Affinity.exe" ]] || fail "vendor installer produced Affinity.exe"
-[[ ! -f $mock_home/.cache/omarchy/affinity/Affinity-x64.exe ]] || fail "installer .exe removed after use"
-[[ -f $mock_root/state/registry-done ]] || fail "registry marker written"
-[[ $(<"$mock_root/state/dpi") == "96" ]] || fail "dpi state written"
-[[ -f $mock_home/.local/share/applications/affinity.desktop ]] || fail "desktop entry installed"
-[[ -f $mock_home/.local/share/icons/hicolor/scalable/apps/affinity.svg ]] || fail "icon installed"
-[[ -f $mock_home/.local/share/mime/packages/omarchy-affinity.xml ]] || fail "MIME definition installed"
-[[ -f $mock_home/.config/hypr/affinity.lua ]] || fail "hyprland fragment installed"
-grep -qF -- '-- omarchy-affinity' "$mock_home/.config/hypr/hyprland.lua" || fail "require line appended"
-strip_jsonc "$mock_home/.config/omarchy/extensions/omarchy-menu.jsonc" | jq -e 'has("install.creative.affinity")' >/dev/null || fail "menu rows written into a fresh extension file"
-pass "mocked install wrote every integration point"
-
-calls_before=$(wc -l <"$mock_root/prefix/winetricks-calls")
-run_mock "$ROOT/bin/omarchy-install-affinity" >"$mock_home/rerun.log" 2>&1 </dev/null || fail "rerun completes"
-calls_after=$(wc -l <"$mock_root/prefix/winetricks-calls")
-(( calls_before == calls_after )) || fail "rerun skips winetricks"
-[[ $(grep -c -- '-- omarchy-affinity' "$mock_home/.config/hypr/hyprland.lua") == 1 ]] || fail "rerun does not duplicate the require line"
-[[ $(grep -c '"install.creative.affinity"' "$mock_home/.config/omarchy/extensions/omarchy-menu.jsonc") == 1 ]] || fail "rerun does not duplicate menu rows"
-pass "rerun is a no-op for prefix and integration files"
-
-output=$(run_mock "$ROOT/bin/omarchy-launch-affinity" "$mock_home/test.afphoto" 2>&1) || fail "launch runs against the mocked install"
-pass "launch runs once installed"
-
-run_mock "$ROOT/bin/omarchy-remove-affinity" >"$mock_home/remove.log" 2>&1 </dev/null || fail "remove completes"
-[[ ! -e $mock_root ]] || fail "prefix and runner removed"
-[[ ! -e $mock_home/.local/share/applications/affinity.desktop ]] || fail "desktop entry removed"
-[[ ! -e $mock_home/.local/share/icons/hicolor/scalable/apps/affinity.svg ]] || fail "icon removed"
-[[ ! -e $mock_home/.local/share/mime/packages/omarchy-affinity.xml ]] || fail "MIME definition removed"
-[[ ! -e $mock_home/.config/hypr/affinity.lua ]] || fail "hyprland fragment removed"
-grep -qF -- '-- omarchy-affinity' "$mock_home/.config/hypr/hyprland.lua" && fail "require line removed"
-strip_jsonc "$mock_home/.config/omarchy/extensions/omarchy-menu.jsonc" | jq -e 'has("install.creative.affinity") | not' >/dev/null || fail "menu rows removed"
-pass "remove leaves no prefix, entries, or rules behind"
-
+python3 "$ROOT/test/affinity-lifecycle"
+python3 "$ROOT/test/affinity-installer"
 echo "all affinity checks passed"

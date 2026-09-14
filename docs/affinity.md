@@ -1,89 +1,169 @@
 # Affinity on Omarchy
 
-`omarchy-install-affinity` puts Canva's unified Affinity app (Photo, Designer and Publisher personas; v3, free tier) on an Omarchy box under a patched Wine, with DXVK doing the rendering, and wires it into Hyprland like any other app: launcher entry, file associations for `.afphoto`/`.afdesign`/`.afpub`/`.psd`, window rules, HiDPI, menu rows. This page covers what it does, what it decided and why, what is fragile, how to report problems, and the licence situation. The raw inventory of what upstream AffinityOnLinux does is in [`NOTES.md`](../NOTES.md).
+This installs Canva's unified Affinity 3 application in a private Wine prefix.
+The Vector, Pixel, and Layout workspaces are part of that application. It is
+still a Windows application: Hyprland manages its XWayland windows.
 
 ## Commands
 
-| Command | What it does |
+| Command | Behavior |
 |---|---|
-| `omarchy-install-affinity` | Installs packages, the patched Wine, the prefix, the app, and every integration point. Rerunnable: each step checks its own marker and skips. |
-| `omarchy-launch-affinity [files...]` | Launches Affinity with the DXVK environment; files are mapped to `Z:` paths. `--winecfg` opens winecfg for this prefix, `--verbose` keeps Wine's errors on the terminal. |
-| `omarchy-remove-affinity` | Kills the prefix's wineserver, deletes the prefix, Wine, cache, launcher, icon, MIME entries, Hyprland fragment and menu rows. Offers to drop winetricks/cabextract. |
+| `omarchy-setup-affinity` | Opens a themed Omarchy terminal with install/repair and uninstall choices. |
+| `omarchy-setup-affinity --install` | Opens the installer directly. |
+| `omarchy-install-affinity` | Runs in the current terminal; useful for installation logs and automation. |
+| `omarchy-launch-affinity` | Launches the private Wine/DXVK application. |
+| `omarchy-launch-affinity --winecfg` | Opens settings for this prefix only. |
+| `omarchy-launch-affinity --verbose` | Keeps diagnostic Wine output on the terminal. |
+| `omarchy-launch-affinity --desktop` | Experimental contained Wine desktop, 1440×900; not the default. |
+| `omarchy-remove-affinity --dry-run` | Shows the paths and removable, recorded packages without changing anything. |
+| `omarchy-setup-affinity --uninstall` | Presents the removal plan, then backs up data and uninstalls. |
+| `omarchy-remove-affinity --yes` | Runs the same removal without the interactive confirmation. |
 
-Menu: **Install > Creative > Affinity** and **Remove > Creative > Affinity**.
+Menu-bar integration is deferred. The old menu fragment remains in the repo for
+future work; the installer no longer edits the Omarchy menu.
 
-## Where things live
+**Document handoff is temporarily guarded.** Passing a file from the file manager
+can crash the running application in its Windows Runtime command-line handler.
+The launcher explains this instead of sending that command. Use **File > Open**
+inside Affinity. The installer registers `.af`, `.afphoto`, `.afdesign`, `.afpub`
+and PSD support but does not take over their default applications. It restores
+any defaults taken by the old installer when a previous association is recorded.
+Developers can opt into the failing path with `--experimental-file-open`.
+
+## Installation and progress
+
+The terminal uses Omarchy's `xdg-terminal-exec`, `org.omarchy.terminal` window
+class, current gum theme, and gum choices. A single progress bar counts completed
+setup stages; it is not an estimate of remaining time. .NET setup can take ten
+minutes or longer. Wine, download, and package output goes into a private log;
+failures show the log location and an actionable final line.
+
+The vendor's Affinity setup wizard still requires interaction. Keep its default
+installation location. On the tested x64/WoW64 system it warned that a native CPU
+installer exists; continuing with Ignore allowed installation. We have not
+established why the vendor displays that warning.
+
+Stages resume from the Wine version marker, completed winetricks verbs, and the
+installed application. Failed downloads never become completed installer files.
+The vendor URL is unversioned, so vendor downloads restart instead of combining
+potentially different releases. Wine and winetricks downloads are checksum-pinned.
+
+System package authentication happens in the visible terminal. Setup and removal
+have an exclusive operation lock; launches hold a shared lock. Removal also
+checks for Wine processes using the prefix and asks you to close the app. It
+never uses a prefix-wide kill to dispose of unsaved work.
+
+## Runtime and efficiency
+
+- ElementalWarrior Wine 11.12 is downloaded from the pinned
+  [Affinity-Wine-Builder release](https://github.com/ryzendew/Affinity-Wine-Builder/releases/tag/11.12).
+  It is a WoW64 build and does not need lib32 packages.
+- The installer reads Arch Wine's mandatory dependencies from the local package
+  repository database and adds the libraries in
+  [`runtime-packages`](../default/affinity/runtime-packages). It **does not install
+  a duplicate system Wine**. GPU drivers remain Omarchy's responsibility.
+- [Winetricks 20260125](https://github.com/Winetricks/winetricks/tree/20260125)
+  is checksum-pinned and kept privately in the application state directory.
+  `OMARCHY_AFFINITY_WINETRICKS` can select another executable for development.
+- Setup installs `dotnet48 corefonts vcrun2022 msxml3 msxml6 tahoma dxvk
+  renderer=vulkan win11`. Successful setup deletes private winetricks downloads,
+  Wine development headers, and import libraries. Runtime DLLs remain intact.
+- XWayland is the default. Wine uses the focused monitor's scale to choose DPI;
+  on the tested 2× monitor this is 192 DPI. The cached value avoids starting Wine
+  just to write an unchanged registry setting on each launch.
+- DXVK renders through Vulkan. The existing upstream AMD workaround remains;
+  we have not established that changing it improves this workload. OpenCL is
+  not configured or verified by this installer.
+
+These changes save disk space. Removing unloaded DLLs or development headers
+does not inherently reduce application memory or improve drawing latency. See
+[the audit](audit.md) for measurements and remaining work.
+
+## Files and ownership
 
 ```
-~/.local/share/omarchy/affinity/
-  wine/      ElementalWarrior Wine 11.12 (vendored per user; .omarchy-version marks it)
-  prefix/    WINEPREFIX; never ~/.wine
-  state/     dpi, registry-done, per-step logs (winetricks-*.log, affinity-setup.log)
-~/.cache/omarchy/affinity/   downloads (Wine tarball kept; installer .exe deleted after use)
+~/.local/share/omarchy-affinity/
+  wine/       patched runtime, without development headers/import libraries
+  prefix/     private Windows environment; never ~/.wine
+  state/      ownership.json, private winetricks, settings, backups and logs
+~/.cache/omarchy/affinity/              private downloads
 ~/.local/share/applications/affinity.desktop
 ~/.local/share/icons/hicolor/scalable/apps/affinity.svg
 ~/.local/share/mime/packages/omarchy-affinity.xml
-~/.config/hypr/affinity.lua              + one require line appended to ~/.config/hypr/hyprland.lua
-~/.config/omarchy/extensions/omarchy-menu.jsonc   four rows appended
+~/.config/hypr/affinity.lua
+~/Affinity Backups/                    verified recovery data after removal
 ```
 
-The repo mirrors Omarchy's own tree (`bin/`, `default/applications`, `default/hypr/apps`, `default/omarchy`) so the files can be moved into `basecamp/omarchy` verbatim later; until then the installer copies them into the user's home.
+`XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_CONFIG_HOME` are honored.
+`OMARCHY_AFFINITY_ROOT` overrides the private installation root. Use the same
+values for all commands. Shared roots, overlapping install/cache roots, and
+symlinked installation directories are refused before mutation. The packaged
+Omarchy directory, `/usr/share/omarchy`, is never modified.
 
-## Runner decision
+An ownership manifest records added system packages, previous desktop assets,
+previous MIME defaults, and installed asset hashes. Private pacman transaction
+logs recover package ownership after an interrupted installation. Existing
+packages are not claimed. Concurrent unrelated package transactions cannot be
+mistaken for ours because each installation transaction has its own log.
 
-Three options were on the table. The choice is **3: ElementalWarrior's Wine fork, prebuilt, vendored per user**, with DXVK from winetricks.
+## Uninstall and recovery
 
-1. **umu-launcher + unmodified GE-Proton.** Rejected for now, not verified. GE-Proton11-6 (2026-08-28) release notes say nothing about WinRT, winmd or Affinity; the umu database has no Affinity entry; umu-protonfixes has no Affinity fix. The upstream project's stock-Wine path (`AffinityWine10.17.sh`) needs a wintypes shim plus a merged `Windows.winmd` from the windows-rs project, and upstream's own known-issues page documents that this combination fails Publisher's `Windows.Services.Store` licence check. Nothing in that picture suggests stock Proton runs the full v3 suite, and no box with a GPU was available to test it in this pass. Worth re-testing when Wine's own generated winmd files (shipped since 10.x) mature.
-2. **umu-launcher + an Affinity-patched Proton.** `Arecsu/proton-affinity` exists (22 patches on proton-cachyos, including XDG portal file dialogs and Wayland fixes) but ships no binaries and its packaging script is marked broken. Building Proton in the SteamRT SDK from an installer is not an end-user experience.
-3. **ElementalWarrior Wine.** Known good; what every working guide and installer uses. No AUR package packages this fork (web search found `affinity-appimage-bin` and `affinity-bin`, which wrap upstream's AppImage/GUI installer, not the runner; aur.archlinux.org was unreachable from the authoring session, so re-check). Building from source takes 30+ minutes and a large toolchain, so the installer downloads the tarball that upstream's own installer downloads (`ryzendew/Affinity-Wine-Builder` release 11.12, 111 MB) and verifies a pinned sha256.
+1. Check the operation lock, active processes, paths, and package dependencies.
+2. Copy data into a private timestamped directory under `~/Affinity Backups/`.
+   Preserve the registry, user data, unexpected files, and changes to inventoried
+   runtime files. Copy Wine's links to Documents/Desktop/Z: as links without
+   following them. Verify copied regular files before removing the originals.
+3. Remove only packages recorded as added by this installer, excluding packages
+   now required by another app. Use pacman's normal dependency checks; never
+   recursively remove global orphans or use `--nodeps`.
+4. Restore prior desktop assets where appropriate, preserve later custom edits,
+   remove this application's integration, then remove its private root/cache.
 
-Trade-off: portability lost (glibc >= 2.38 required, fine on Arch), simplicity for end users gained. Bumping Wine means changing three values in `bin/omarchy-affinity-env`; the installer replaces the vendored build when the version differs.
+A fresh install inventories disposable runtime files; unchanged copies are not
+included in the recovery backup. A legacy install has no trustworthy original
+inventory, so its **entire prefix** is preserved. That backup includes Windows
+runtime files and is larger, deliberately. It is recovery data, separate from
+the removed active installation.
 
-Why the prebuilt matters, concretely: the 11.12 build is WoW64 (no lib32 packages needed), ships its own `share/wine/winmd/*.winmd` files and a patched `wintypes.dll`, so the WinMetadata download that older guides require is unnecessary. Those WinMetadata archives are Microsoft-copyrighted files lifted from a Windows install with no redistribution licence; not downloading them is also the licence-sane answer. The archive's checksum is recorded in `NOTES.md` in case a future Wine drop regresses.
+User documents outside the prefix remain in place. The manager commands and
+this repository remain available for reinstalling. Shared preexisting caches
+(such as an old `~/.cache/winetricks`) are not deleted without ownership evidence.
+An incomplete backup or package-check failure leaves the installation in place.
 
-## What the prefix gets
+To restore after reinstalling, close Affinity and copy the saved prefix contents
+into the new prefix. Review the backup's README and registry before restoring
+across application versions; Wine/app data migration is not guaranteed.
 
-- Arch packages: `wine` (runtime-library carrier for the vendored build; skipped when `wine-staging` from Lutris is present), `winetricks`, `cabextract`, `unzip`, `vulkan-icd-loader`. GPU Vulkan drivers come from Omarchy's own hardware setup.
-- `wineboot` with Mono and Gecko disabled (no dialogs), then winetricks `dotnet48 corefonts vcrun2022 msxml3 msxml6 tahoma dxvk renderer=vulkan win11`, unattended, one log per verb under `state/`. `dotnet48` is the slow one (5-10 minutes).
-- Registry: `Drivers\Graphics=x11` (stay on XWayland; the Hyprland rules and upstream testing assume it), the AffinityOnLinux dark theme for Win32 dialogs, and `Control Panel\Desktop\LogPixels` set from the focused monitor's Hyprland scale (2x monitor gives 192 DPI). The launcher re-applies DPI when the scale changes; `OMARCHY_AFFINITY_DPI=144` pins it.
-- Launch env: `WINEDEBUG=-all`, `winemenubuilder.exe=d` (Wine does not get to write launcher or MIME entries), `DXVK_ASYNC=0`, `DXVK_LOG_LEVEL=none`, and upstream's `DXVK_CONFIG` on AMD GPUs.
-- OpenCL is off by omission: no vkd3d-proton, no `d3d12` overrides, no OpenCL ICD. Affinity then has nothing to accelerate with and stays on DXVK. Leave **Preferences > Performance > Hardware Acceleration** unticked.
+## Window behavior
 
-Not carried over from upstream, on purpose: WebView2 (broken under Wine regardless; only in-app Help and Canva sign-in use it), AffinityPluginLoader/WineFix (a candidate follow-up: it fixes "preferences not saving"), the local `mscms.dll` shim, the JPEG XL profile quarantine.
+The main document window tiles. Affinity windows are opaque for color work;
+known named dialogs float and center. **Menus and tool flyouts retain their
+application-requested positions.** A broad center-all-floating rule caused the
+original nearly unusable hover behavior. An empty title or X11 `DIALOG` type is
+not enough to distinguish a menu from a dialog.
 
-## Hyprland integration
+Hyprland already manages native Wayland, native Linux X11, and Wine windows.
+Changing Wine's driver or using a Wine desktop does not turn Affinity into a
+Linux executable. XWayland remains the verified path. Native Wine Wayland and
+contained-desktop behavior need separate real-document regression testing.
 
-`default/hypr/apps/affinity.lua`: every Affinity window has the XWayland class `affinity.exe` (the installer wizard: `affinity x64.exe`). Wine marks splash, progress and modal dialogs as transient and Hyprland floats those itself; the rules centre anything floating, opt the app out of Omarchy's default translucency (colour work), float a list of dialog titles as a fallback, and set `focus_on_activate=false` so a late dialog does not drag focus across workspaces. The document window tiles. `Super+Q` sends a close request that Affinity answers with its own save prompt.
+## Known limits and diagnostics
 
-The window classes and titles were taken from upstream's `StartupWMClass` and Wine's naming convention, not captured with `hyprctl clients` on a live install. If a dialog tiles or a splash sits off-centre, run `hyprctl clients -j | jq '.[] | select(.class | test("affinity"))'` while it is open and add the title to the fallback list.
+- File-manager document handoff is guarded pending a complete WinRT fix.
+- Canva sign-in and embedded Help/WebView2 have not passed testing.
+- Color-profile APIs report unimplemented operations. Color-critical output
+  needs validation; opacity alone does not establish accurate color management.
+- Tablet/Wintab support, panel undocking, preference persistence, large PSDs,
+  export fidelity, and prolonged editing sessions remain unverified.
+- The launcher assumes Omarchy's XWayland zero-scaling configuration. Use
+  `OMARCHY_AFFINITY_DPI` to pin DPI for a different setup.
 
-## Wine-fragile
+Use `omarchy-launch-affinity --verbose` for diagnostics, `test/affinity-profile`
+for a read-only CPU/PSS sample, and `test/affinity-interactions` for the documented
+live menu regression. `test/affinity` runs static validation and isolated lifecycle
+regressions without Wine or a desktop.
 
-- **The vendor installer.** It is a normal Windows wizard with no silent switch; the only clicking in the whole install. Upstream warns that a spurious error at the end should be answered "No" so it does not roll back. `state/affinity-setup.log` has Wine's output.
-- **winetricks.** `dotnet48` and `dxvk` download from Microsoft and GitHub; both can fail on flaky networks. Reruns resume from the failed verb because winetricks logs finished verbs in `prefix/winetricks.log`.
-- **Undocking panels.** Upstream's known-issues page: dragging UI panels out of the main window can crash Affinity, a Wine window-management limitation. Keep panels docked or import a Studio layout.
-- **Sign-in and Help.** Both need WebView2, which does not work under Wine. The app works offline without an account on the free tier.
-- **The download URL.** `https://downloads.affinity.studio/Affinity%20x64.exe` is what upstream fetches; it was not reachable from the authoring session, so it is unverified here. If Canva moves it, `AFFINITY_INSTALLER_URL` in `bin/omarchy-affinity-env` is the one line to change; dropping an installer at `~/.cache/omarchy/affinity/Affinity-x64.exe` also works.
-- **DPI.** Assumes Omarchy's `xwayland.force_zero_scaling = true`. With that off, halve the DPI via `OMARCHY_AFFINITY_DPI`.
-
-## Reporting bugs
-
-Run `omarchy-launch-affinity --verbose` from a terminal and attach the output, plus `state/affinity-setup.log` or the failing `state/winetricks-*.log`, the GPU (`omarchy-hw-nvidia; lspci | grep -i vga`), `hyprctl monitors`, and the Wine version (`~/.local/share/omarchy/affinity/wine/bin/wine --version`). Say whether the same document misbehaves in the upstream AffinityOnLinux installer; if it does, the bug belongs there (or in ElementalWarrior's Wine), not in this installer.
-
-## Licence
-
-This repo ships an installer, window rules, a desktop entry, and a MIME definition. It does not ship Affinity. Affinity is proprietary software from Canva/Serif; the installer downloads it from Canva's own server and the user accepts Canva's terms in the wizard. The free tier is what gets installed; paid features are Canva's business. The Affinity icon is Canva's trademark, vendored from AffinityOnLinux the same way upstream ships it, for the launcher entry only. The patched Wine is LGPL (Wine) plus ElementalWarrior's patches, downloaded as a release tarball from `ryzendew/Affinity-Wine-Builder`. No Windows system files are downloaded.
-
-## Test checklist
-
-Run on 2026-09-13 from a remote container: no Arch, no Wine, no GPU, no Hyprland, and `downloads.affinity.studio` blocked by the network policy. Nothing below was exercised on real hardware; what did run is the static suite in `test/affinity` (bash syntax, metadata, desktop/MIME/JSONC validity, the launcher's not-installed path, remove on an empty home, and the menu append/remove round trip). Every unchecked item needs a real Omarchy box; results go here.
-
-- [ ] Fresh Omarchy VM/box: installer completes with no prompts beyond sudo and the vendor wizard
-- [ ] App launches in < 15 s cold, no dead splash
-- [ ] Open, edit, export a `.afphoto` and a `.psd`
-- [ ] Vulkan renderer active (Preferences > Performance shows the GPU under DXVK); brushes don't lag
-- [ ] Save/Open dialogs float, main window tiles, Super+Q closes cleanly
-- [ ] Clipboard copy/paste to and from a native Wayland app
-- [ ] HiDPI: text isn't tiny on a 2x display
-- [ ] Rerun installer: no-op; uninstall: prefix and entries gone
-- [x] Static: `test/affinity` passes
+Affinity is proprietary and downloaded from Canva; its terms and account
+requirements apply. Wine is LGPL; winetricks has its own LGPL license. The
+experimental WinRT investigation is documented under
+[`experiments/winrt`](../experiments/winrt/README.md) and is not installed.

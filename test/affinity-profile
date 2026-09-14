@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Sample CPU/PSS during a named Affinity workload. Never drives the UI."""
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--seconds', type=float, default=10)
+parser.add_argument('--label', default='unspecified', help='Workload and candidate, e.g. baseline-pan-01')
+args = parser.parse_args()
+if not 1 <= args.seconds <= 60:
+    parser.error('--seconds must be between 1 and 60')
+root = Path(os.environ.get('OMARCHY_AFFINITY_ROOT', Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'omarchy-affinity'))
+root = root.expanduser().resolve()
+prefix = os.fsencode('WINEPREFIX=' + str(root / 'prefix'))
+
+
+def sample():
+    results = {}
+    for path in Path('/proc').glob('[0-9]*'):
+        try:
+            if prefix not in (path / 'environ').read_bytes().split(b'\0'):
+                continue
+            fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
+            memory = (path / 'smaps_rollup').read_text().splitlines()
+            pss = sum(int(line.split()[1]) for line in memory if line.startswith('Pss:'))
+            # Include start time so PID reuse cannot create a false CPU delta.
+            results[(path.name, fields[19])] = {'name': (path / 'comm').read_text().strip(), 'ticks': int(fields[11]) + int(fields[12]), 'pss_kib': pss}
+        except (OSError, ValueError, IndexError):
+            pass
+    return results
+
+
+def command(argv):
+    try:
+        return subprocess.check_output(argv, text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def monitor_context():
+    try:
+        monitors = json.loads(command(['hyprctl', 'monitors', '-j']) or '[]')
+        return [{key: m.get(key) for key in ('name', 'width', 'height', 'scale', 'refreshRate')} for m in monitors]
+    except (ValueError, TypeError):
+        return []
+
+
+context = {'kernel': platform.release(), 'wine': command([str(root / 'wine/bin/wine'), '--version']),
+           'monitors': monitor_context(), 'packages': command(['pacman', '-Q', 'mesa', 'vulkan-radeon', 'hyprland']),
+           'revision': command(['git', '-C', str(Path(__file__).resolve().parent.parent), 'rev-parse', 'HEAD']),
+           'working_tree': command(['git', '-C', str(Path(__file__).resolve().parent.parent), 'status', '--porcelain'])}
+before = sample()
+if not any(p['name'].lower() == 'affinity.exe' for p in before.values()):
+    sys.exit('Affinity is not running in this prefix; no workload was measured.')
+start = time.monotonic()
+previous, previous_time = before, start
+observations = []
+cpu_ticks = {}
+seen = dict(before)
+while time.monotonic() - start < args.seconds:
+    time.sleep(min(1, max(0, args.seconds - (time.monotonic() - start))))
+    after = sample()
+    now = time.monotonic()
+    delta_ticks = 0
+    for identity in previous.keys() & after.keys():
+        delta = max(0, after[identity]['ticks'] - previous[identity]['ticks'])
+        cpu_ticks[identity] = cpu_ticks.get(identity, 0) + delta
+        delta_ticks += delta
+    observations.append({'elapsed_seconds': round(now - start, 3),
+                         'pss_mib': round(sum(p['pss_kib'] for p in after.values()) / 1024, 2),
+                         'cpu_percent_one_core': round(delta_ticks / os.sysconf('SC_CLK_TCK') / (now - previous_time) * 100, 2),
+                         'affinity_running': any(p['name'].lower() == 'affinity.exe' for p in after.values())})
+    seen.update(after)
+    previous, previous_time = after, now
+elapsed = time.monotonic() - start
+ticks = os.sysconf('SC_CLK_TCK')
+processes = []
+for identity, value in sorted(seen.items()):
+    processes.append({'pid': int(identity[0]), 'name': value['name'],
+                      'present_at_end': identity in after,
+                      'pss_mib': round(after.get(identity, {}).get('pss_kib', 0) / 1024, 2),
+                      'cpu_percent_one_core': round(cpu_ticks.get(identity, 0) / ticks / elapsed * 100, 2)})
+complete = all(o['affinity_running'] for o in observations)
+print(json.dumps({'schema_version': 2, 'label': args.label, 'context': context,
+                  'seconds': round(elapsed, 2), 'processes': processes, 'observations': observations,
+                  'affinity_present_throughout_samples': complete,
+                  'total_pss_mib': observations[-1]['pss_mib'],
+                  'sampled_peak_pss_mib': max([sum(p['pss_kib'] for p in before.values()) / 1024] + [o['pss_mib'] for o in observations]),
+                  'total_cpu_percent_one_core': round(sum(cpu_ticks.values()) / ticks / elapsed * 100, 2),
+                  'limitations': 'One-second samples miss short-lived processes and allocation peaks; CPU excludes intervals without both process samples. Does not measure input latency, GPU memory, or export duration.'}, indent=2))
+sys.exit(0 if complete else 1)
